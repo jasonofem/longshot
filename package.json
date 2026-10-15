@@ -1,0 +1,48 @@
+{
+  "name": "longshot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LONGSHOT — a weekly longshot-accumulator portfolio engine. Zero npm dependencies, plain ESM + a static dashboard, deployed to Vercel.",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "cli": "node bin/longshot.mjs",
+    "test": "node --test test/*.test.js",
+    "bundle": "node scripts/bundle.mjs --check",
+    "bundle:only": "node scripts/bundle.mjs",
+    "build": "npm run bundle && node scripts/vercel-dist.mjs",
+    "preview:static": "node scripts/preview-static.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "longshot",
+    "accumulator",
+    "portfolio",
+    "sports-betting",
+    "expected-value",
+    "edge",
+    "nigeria",
+    "naira"
+  ],
+  "license": "MIT",
+  "exports": {
+    ".": "./lib/longshot.js",
+    "./http-core": "./lib/http-core.js",
+    "./local-api": "./public/local-api.js",
+    "./store": "./lib/store.js",
+    "./memory-store": "./lib/memory-store.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "public",
+    "api",
+    "server",
+    "bin",
+    "README.md"
+  ]
+}
