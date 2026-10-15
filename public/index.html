@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>LONGSHOT — Weekly Longshot-Accumulator Portfolio Engine</title>
+<meta name="description" content="Weekly longshot-accumulator portfolio engine (odds 10.0–1000.0, stake ₦100–₦500). De-vigs live bookmaker prices, blends sharp quotes with ratings, and issues 7 value accumulators per week." />
+<meta name="theme-color" content="#070a0c" />
+<!-- Cache discipline stamp: bumped on every release -->
+<link rel="stylesheet" href="/app.css?v=1.0.0" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308110d'/%3E%3Cpath d='M8 24l7-10 4 5 6-11' stroke='%233ddc97' stroke-width='2.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='25' cy='8' r='2.5' fill='%23ffc857'/%3E%3C/svg%3E" />
+</head>
+<body>
+<div class="bg-grid" aria-hidden="true"></div>
+<canvas id="confetti" aria-hidden="true"></canvas>
+
+<!-- Topbar -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">🎯</span>
+    <div class="brand-titles">
+      <span class="brand-text">LONG<b>SHOT</b></span>
+      <span class="brand-sub">portfolio engine</span>
+    </div>
+    <span class="brand-tag">v1.0</span>
+  </div>
+
+  <div class="topbar-metrics">
+    <div class="metric-pill" title="Modelled expected wins vs your weekly goal">
+      <span class="metric-label">Exp / Goal</span>
+      <span class="metric-val" id="topbar-goal-val">0.00 / 2</span>
+    </div>
+    <div class="metric-pill" title="Total staked this week across issued tickets">
+      <span class="metric-label">Staked</span>
+      <span class="metric-val" id="topbar-staked-val">₦0</span>
+    </div>
+    <div class="metric-pill" title="Total returned from settled winning tickets">
+      <span class="metric-label">Returned</span>
+      <span class="metric-val" id="topbar-returned-val">₦0</span>
+    </div>
+    <div class="metric-pill pnl-pill" id="topbar-pnl-pill" title="Net running week profit/loss">
+      <span class="metric-label">Week P&L</span>
+      <span class="metric-val" id="topbar-pnl-val">₦0.00</span>
+    </div>
+  </div>
+
+  <div class="topbar-right">
+    <div class="quota-pill" id="topbar-quota-pill" title="The Odds API quota status" hidden>
+      <span class="quota-dot"></span>
+      <span class="quota-text" id="topbar-quota-text">Quota: —</span>
+    </div>
+    <span class="storage-badge" id="storage-badge">local</span>
+    <div class="clock" id="clock">WAT 00:00</div>
+    <button class="btn btn-ghost btn-sm" id="btn-quick-settings" title="Settings">⚙</button>
+  </div>
+</header>
+
+<!-- Loud Gold SIMULATED Banner -->
+<div class="simulated-banner" id="simulated-banner" hidden>
+  <div class="simulated-content">
+    <div class="simulated-badge">⚠ SIMULATED</div>
+    <div class="simulated-body">
+      <strong id="simulated-headline">Market prices are currently simulated.</strong>
+      <span id="simulated-reason">You asked for live odds but no API key was available. Add your Odds API key in Settings for real bookmaker quotes.</span>
+    </div>
+  </div>
+  <button class="btn btn-xs btn-gold-outline" id="btn-sim-fix">Configure Key →</button>
+</div>
+
+<!-- Tabs Navigation -->
+<nav class="tabs" id="tabs">
+  <button class="tab is-active" data-tab="week-board">Week Board</button>
+  <button class="tab" data-tab="today-ticket">Today's Ticket <span class="tab-dot" id="tab-today-dot" hidden></span></button>
+  <button class="tab" data-tab="market">Market & Quota</button>
+  <button class="tab" data-tab="history">History</button>
+  <button class="tab" data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <!-- ══════════════════════════ TAB 1: WEEK BOARD ══════════════════════════ -->
+  <section class="view is-active" id="view-week-board">
+    <!-- Week Header Card -->
+    <div class="panel week-hero-panel">
+      <div class="week-hero-top">
+        <div>
+          <div class="eyebrow">Weekly Portfolio · Africa/Lagos (Monday – Sunday)</div>
+          <h1 class="week-title" id="week-title">Loading portfolio…</h1>
+          <div class="week-subtitle" id="week-subtitle">7 daily accumulators landing in 10.0 – 1000.0 odds</div>
+        </div>
+        <div class="week-hero-right">
+          <div class="issued-counter" id="issued-counter-chip">7 of 7 issued</div>
+          <div class="week-action-buttons">
+            <button class="btn btn-primary" id="btn-build-week">⚡ Build this week</button>
+            <button class="btn btn-ghost btn-sm" id="btn-rescan-week">↻ Rescan</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Verdict Banner (Landed >= 2 or settlement completed) -->
+      <div class="verdict-card" id="verdict-banner" hidden>
+        <div class="verdict-icon" id="verdict-icon">🎯</div>
+        <div class="verdict-text">
+          <div class="verdict-headline" id="verdict-headline">2 of 7 landed — the longshot board paid</div>
+          <div class="verdict-sub" id="verdict-sub">Manual settlement completed for this week.</div>
+        </div>
+      </div>
+
+      <!-- Honest Goal Assessment Panel -->
+      <div class="goal-reality-panel" id="goal-reality-panel">
+        <div class="goal-reality-head">
+          <div class="goal-reality-badge">Honest Modelled Reality</div>
+          <div class="goal-odds-band" id="goal-odds-band">Optimal Odds Band: 3.5 – 4.5</div>
+        </div>
+        <p class="goal-reality-desc" id="goal-reality-desc">
+          Your target is 2–3 wins/week. The modelled expectation at longshot odds (≥10.0) is 0.93 wins (13.3% avg win rate). The engine treats your goal as an optimisation target, never as a promise.
+        </p>
+        <p class="goal-reality-sub" id="goal-reality-sub">
+          To mathematically average 2.0 expected wins across 7 tickets, tickets would require an average win probability of 28.6% (odds band ~3.5–4.5).
+        </p>
+      </div>
+    </div>
+
+    <!-- 7 Ticket Cards Grid -->
+    <div class="panel-section-title">
+      <h2>The 7 Daily Accumulators (10.0 – 1000.0 combined odds)</h2>
+      <span class="panel-note">One leg per event · Edge floors enforced · Scaled stakes (₦100 – ₦500)</span>
+    </div>
+
+    <div class="tickets-grid" id="tickets-grid">
+      <!-- Injected by app.js -->
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ TAB 2: TODAY'S TICKET ══════════════════════════ -->
+  <section class="view" id="view-today-ticket">
+    <div class="slip-header-card panel">
+      <div class="slip-selector-row">
+        <div class="slip-nav-btns" id="slip-nav-days">
+          <!-- Day buttons Mon..Sun -->
+        </div>
+        <div class="slip-actions">
+          <button class="btn btn-ghost btn-sm" id="btn-rescan-single-ticket">↻ Rescan today</button>
+        </div>
+      </div>
+
+      <div class="slip-top-row" id="slip-top-row">
+        <div>
+          <div class="eyebrow" id="slip-eyebrow">TICKET 1 · MONDAY</div>
+          <h1 class="slip-match-title" id="slip-day-title">Accumulator Slip</h1>
+          <div class="provider-stamp-line" id="slip-provider-line">Provider: —</div>
+        </div>
+
+        <div class="slip-stat-trio">
+          <div class="stat-box">
+            <span class="stat-label">Combined Odds</span>
+            <span class="stat-val stat-odds" id="slip-combined-odds">—</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Win Probability</span>
+            <span class="stat-val stat-winprob" id="slip-win-prob">—</span>
+            <span class="stat-sub" id="slip-one-in-x">—</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Recommended Stake</span>
+            <span class="stat-val stat-stake" id="slip-stake">—</span>
+            <span class="stat-sub" id="slip-conf-band">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stake Band Explanation Box -->
+      <div class="stake-band-box" id="slip-stake-band-box">
+        <div class="stake-band-pill" id="slip-band-badge">BAND B</div>
+        <div class="stake-band-text" id="slip-band-reason">Loading confidence rationale…</div>
+      </div>
+
+      <!-- Slip Analytics Bar -->
+      <div class="slip-analytics-bar">
+        <span>Fair Odds: <b id="slip-fair-odds">—</b></span>
+        <span>Total Edge: <b id="slip-total-edge">—</b></span>
+        <span>Slip EV: <b id="slip-ev">—</b></span>
+        <span>Correlation Haircut: <b id="slip-corr">—</b></span>
+        <span>Edge Tier: <b id="slip-tier-label">—</b></span>
+      </div>
+    </div>
+
+    <!-- Legs Table -->
+    <div class="panel legs-panel">
+      <div class="panel-head">
+        <h2>Selections in this Accumulator (<span id="slip-leg-count">0</span> legs)</h2>
+        <span class="panel-note">Real bookmaker line-shopping · Max 1 leg per match</span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="legs-table">
+          <thead>
+            <tr>
+              <th>Sport / League</th>
+              <th>Fixture</th>
+              <th>Kickoff</th>
+              <th>Market</th>
+              <th>Pick</th>
+              <th>Best Book</th>
+              <th>Odds</th>
+              <th>Model Prob</th>
+              <th>Edge</th>
+              <th>Conf</th>
+            </tr>
+          </thead>
+          <tbody id="legs-table-body">
+            <!-- Injected by app.js -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Settlement Card for this ticket -->
+    <div class="panel settlement-panel" id="slip-settlement-panel">
+      <div class="settle-content">
+        <div>
+          <h3>Manual Settlement</h3>
+          <p>Live fixtures have no on-device ground truth. Record whether this accumulator won or lost at your bookmaker.</p>
+        </div>
+        <div class="settle-buttons" id="slip-settle-buttons">
+          <button class="btn btn-green" id="btn-settle-won">✓ Landed (Won)</button>
+          <button class="btn btn-red" id="btn-settle-lost">✗ Missed (Lost)</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ TAB 3: MARKET & QUOTA ══════════════════════════ -->
+  <section class="view" id="view-market">
+    <div class="panel market-top-panel">
+      <div class="market-controls">
+        <div class="control-group">
+          <label for="market-date-picker">Market Date</label>
+          <input type="date" id="market-date-picker" class="input" />
+        </div>
+        <button class="btn btn-primary" id="btn-scan-live">⚡ Scan LIVE Odds</button>
+        <button class="btn btn-ghost" id="btn-scan-sim">Scan Simulated</button>
+      </div>
+
+      <!-- Quota line -->
+      <div class="quota-hero-box" id="quota-hero-box">
+        <div class="quota-head">
+          <div>
+            <h3>The Odds API Quota Status</h3>
+            <span class="panel-note">Header capture from api.the-odds-api.com v4</span>
+          </div>
+          <div class="quota-nums" id="quota-nums">Remaining: — / Used: —</div>
+        </div>
+        <div class="quota-bar-track">
+          <div class="quota-bar-fill" id="quota-bar-fill" style="width: 100%;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 23 SPORT_MAP Leagues Chips -->
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Multi-Sport Coverage Board (23 Competitions)</h2>
+        <span class="panel-note">Football + Basketball + Tennis + Baseball + Hockey + MMA</span>
+      </div>
+      <p class="panel-sub">
+        The engine scans across 23 global sports leagues. Unknown or out-of-season leagues become per-league status chips rather than fatal errors.
+      </p>
+      <div class="league-chips-grid" id="league-chips-grid">
+        <!-- Injected by app.js -->
+      </div>
+    </div>
+
+    <!-- Available Scanned Legs Pool -->
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Priced Legs Pool (<span id="market-pool-count">0</span> legs)</h2>
+        <div class="filter-controls">
+          <select id="filter-market-sport" class="select-sm">
+            <option value="all">All Sports</option>
+            <option value="football">Football</option>
+            <option value="basketball">Basketball</option>
+            <option value="tennis">Tennis</option>
+            <option value="baseball">Baseball</option>
+            <option value="icehockey">Ice Hockey</option>
+            <option value="mma">MMA</option>
+          </select>
+          <label class="checkbox-label">
+            <input type="checkbox" id="filter-market-pos-edge" checked />
+            Positive edge only
+          </label>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="market-legs-table">
+          <thead>
+            <tr>
+              <th>Sport</th>
+              <th>League</th>
+              <th>Match</th>
+              <th>Market</th>
+              <th>Pick</th>
+              <th>Best Book</th>
+              <th>Odds</th>
+              <th>Model %</th>
+              <th>Edge pp</th>
+              <th>Conf</th>
+            </tr>
+          </thead>
+          <tbody id="market-legs-body">
+            <!-- Injected by app.js -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ TAB 4: HISTORY ══════════════════════════ -->
+  <section class="view" id="view-history">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Weekly Portfolio History</h2>
+        <span class="panel-note">Settled weeks & verified P&L performance</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="history-table">
+          <thead>
+            <tr>
+              <th>Week</th>
+              <th>Status</th>
+              <th>Goal</th>
+              <th>Landed</th>
+              <th>Total Staked</th>
+              <th>Returned</th>
+              <th>Net P&L (₦)</th>
+              <th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body">
+            <!-- Injected by app.js -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ TAB 5: SETTINGS ══════════════════════════ -->
+  <section class="view" id="view-settings">
+    <div class="settings-grid">
+      <!-- Odds API Key Box -->
+      <div class="panel settings-panel">
+        <div class="panel-head">
+          <h2>The Odds API Key</h2>
+          <span class="panel-note">api.the-odds-api.com v4</span>
+        </div>
+        <p class="panel-sub">
+          Paste your key below. It is saved in your browser's localStorage and only transmitted to same-origin scan routes. The server environment variable <code>ODDS_API_KEY</code> is also honoured when present.
+        </p>
+
+        <div class="form-group">
+          <label for="input-api-key">API Key</label>
+          <textarea id="input-api-key" class="textarea key-textarea" rows="2" placeholder="Paste your 32-character Odds API key here…"></textarea>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btn-save-api-key">Save Key</button>
+          <span class="key-status-text" id="key-status-text">No key configured (using SIMULATED fallback)</span>
+        </div>
+      </div>
+
+      <!-- Weekly Win Goal -->
+      <div class="panel settings-panel">
+        <div class="panel-head">
+          <h2>Weekly Portfolio Goal</h2>
+          <span class="panel-note">Target winning tickets out of 7</span>
+        </div>
+        <p class="panel-sub">
+          The engine treats your goal as an optimisation objective for win probability, never as a promise.
+        </p>
+
+        <div class="form-group">
+          <label for="input-goal">Target Wins per Week</label>
+          <select id="input-goal" class="select">
+            <option value="2">2 winning tickets / week</option>
+            <option value="3">3 winning tickets / week</option>
+            <option value="1">1 winning ticket / week (conservative)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="input-min-edge">Minimum Edge Floor per Leg</label>
+          <select id="input-min-edge" class="select">
+            <option value="0.012">+1.2pp (+0.012) — Standard</option>
+            <option value="0.008">+0.8pp (+0.008) — Moderate</option>
+            <option value="0.004">+0.4pp (+0.004) — Relaxed</option>
+            <option value="0.000">0.0pp — Positive Edge Only</option>
+          </select>
+          <span class="field-hint">Tiered relaxation automatically kicks in if the strict floor starves the pool.</span>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btn-save-goals">Save Goals</button>
+        </div>
+      </div>
+
+      <!-- Stake Bands Configuration -->
+      <div class="panel settings-panel">
+        <div class="panel-head">
+          <h2>Confidence Stake Bands (₦)</h2>
+          <span class="panel-note">Scaled by ticket data quality</span>
+        </div>
+        <p class="panel-sub">
+          Ticket confidence (A/B/C/D) is a pure data-quality metric (cross-book agreement, number of quoting books, kickoff window), never a disguised win probability.
+        </p>
+
+        <div class="stake-bands-grid">
+          <div class="form-group">
+            <label for="stake-band-a">Band A (₦)</label>
+            <input type="number" id="stake-band-a" class="input" min="50" max="5000" step="50" value="500" />
+            <span class="field-hint">Highest data depth</span>
+          </div>
+          <div class="form-group">
+            <label for="stake-band-b">Band B (₦)</label>
+            <input type="number" id="stake-band-b" class="input" min="50" max="5000" step="50" value="350" />
+            <span class="field-hint">Strong cross-book data</span>
+          </div>
+          <div class="form-group">
+            <label for="stake-band-c">Band C (₦)</label>
+            <input type="number" id="stake-band-c" class="input" min="50" max="5000" step="50" value="200" />
+            <span class="field-hint">Moderate book depth</span>
+          </div>
+          <div class="form-group">
+            <label for="stake-band-d">Band D (₦)</label>
+            <input type="number" id="stake-band-d" class="input" min="50" max="5000" step="50" value="100" />
+            <span class="field-hint">Conservative / thin pool</span>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btn-save-stakes">Save Stakes</button>
+        </div>
+      </div>
+
+      <!-- Board Trim (Save API Credits) -->
+      <div class="panel settings-panel span-2">
+        <div class="panel-head">
+          <h2>Trim Board (Save Odds API Credits)</h2>
+          <span class="panel-note">Check competitions to query</span>
+        </div>
+        <p class="panel-sub">
+          Each checked competition costs 1 API request per live scan. Uncheck sports you don't bet on to conserve monthly free quota (500 requests/month).
+        </p>
+
+        <div class="trim-actions">
+          <button class="btn btn-xs btn-ghost" id="btn-trim-all">Select All (23)</button>
+          <button class="btn btn-xs btn-ghost" id="btn-trim-football-only">Football Only</button>
+          <button class="btn btn-xs btn-ghost" id="btn-trim-top-tiers">Top Tiers (EPL, NBA, La Liga)</button>
+        </div>
+
+        <div class="trim-checkbox-grid" id="trim-checkbox-grid">
+          <!-- Injected by app.js from SPORT_MAP -->
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" id="btn-save-trim">Save Board Trim</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Modals -->
+<!-- Setup Week Modal -->
+<div class="modal-backdrop" id="modal-setup" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Build New Weekly Portfolio</h3>
+      <button class="btn btn-ghost btn-xs btn-close" id="btn-close-setup">✕</button>
+    </div>
+    <div class="modal-body">
+      <!-- Inline red error box (toasts get missed!) -->
+      <div class="error-box" id="modal-setup-error" hidden></div>
+
+      <p class="modal-desc">
+        Creates a new portfolio of 7 accumulators (Monday through Sunday in Africa/Lagos), each landing between 10.0 and 1000.0 odds.
+      </p>
+
+      <div class="form-group">
+        <label for="modal-week-date">Week Reference Date</label>
+        <input type="date" id="modal-week-date" class="input" />
+        <span class="field-hint">The week will span Monday to Sunday of the selected date.</span>
+      </div>
+
+      <div class="form-group">
+        <label for="modal-provider-select">Pricing Provider</label>
+        <select id="modal-provider-select" class="select">
+          <option value="oddsapi">The Odds API v4 (Live Quotes)</option>
+          <option value="sim">Simulated Market (Multi-book vig model)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="modal-goal-select">Weekly Target Goal</label>
+        <select id="modal-goal-select" class="select">
+          <option value="2">2 winning tickets / week</option>
+          <option value="3">3 winning tickets / week</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btn-cancel-setup">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm-create-week">Build Portfolio</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual Settle Modal -->
+<div class="modal-backdrop" id="modal-settle" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Settle Accumulator Ticket</h3>
+      <button class="btn btn-ghost btn-xs btn-close" id="btn-close-settle">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="error-box" id="modal-settle-error" hidden></div>
+
+      <p id="modal-settle-desc">Confirm the outcome of this ticket.</p>
+      <div class="settle-summary-box" id="modal-settle-summary"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btn-cancel-settle">Cancel</button>
+      <button class="btn btn-red" id="btn-modal-settle-lost">Record Lost (₦0)</button>
+      <button class="btn btn-green" id="btn-modal-settle-won">Record Won</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- Asset Stamp Script -->
+<script type="module" src="/app.js?v=1.0.0"></script>
+</body>
+</html>
