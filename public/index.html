@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>LONGSHOT — Weekly Longshot-Accumulator Portfolio Engine</title>
-<meta name="description" content="Weekly longshot-accumulator portfolio engine (odds 10.0–1000.0, stake ₦100–₦500). De-vigs live bookmaker prices, blends sharp quotes with ratings, and issues 7 value accumulators per week." />
+<meta name="description" content="Weekly longshot-accumulator portfolio engine (odds 20.0–1000.0, stake ₦100–₦500). De-vigs live bookmaker prices, blends sharp quotes with ratings, and issues 7 value accumulators per week." />
 <meta name="theme-color" content="#070a0c" />
 <!-- Cache discipline stamp: bumped on every release -->
 <link rel="stylesheet" href="/app.css?v=1.0.0" />
@@ -85,7 +85,7 @@
         <div>
           <div class="eyebrow">Weekly Portfolio · Africa/Lagos (Monday – Sunday)</div>
           <h1 class="week-title" id="week-title">Loading portfolio…</h1>
-          <div class="week-subtitle" id="week-subtitle">7 daily accumulators landing in 10.0 – 1000.0 odds</div>
+          <div class="week-subtitle" id="week-subtitle">7 daily accumulators landing in 20.0 – 1000.0 odds</div>
         </div>
         <div class="week-hero-right">
           <div class="issued-counter" id="issued-counter-chip">7 of 7 issued</div>
@@ -112,7 +112,7 @@
           <div class="goal-odds-band" id="goal-odds-band">Optimal Odds Band: 3.5 – 4.5</div>
         </div>
         <p class="goal-reality-desc" id="goal-reality-desc">
-          Your target is 2–3 wins/week. The modelled expectation at longshot odds (≥10.0) is 0.93 wins (13.3% avg win rate). The engine treats your goal as an optimisation target, never as a promise.
+          Your target is 2–3 wins/week. The modelled expectation at longshot odds (≥20.0) is 0.93 wins (13.3% avg win rate). The engine treats your goal as an optimisation target, never as a promise.
         </p>
         <p class="goal-reality-sub" id="goal-reality-sub">
           To mathematically average 2.0 expected wins across 7 tickets, tickets would require an average win probability of 28.6% (odds band ~3.5–4.5).
@@ -122,7 +122,7 @@
 
     <!-- 7 Ticket Cards Grid -->
     <div class="panel-section-title">
-      <h2>The 7 Daily Accumulators (10.0 – 1000.0 combined odds)</h2>
+      <h2>The 7 Daily Accumulators (20.0 – 1000.0 combined odds)</h2>
       <span class="panel-note">One leg per event · Edge floors enforced · Scaled stakes (₦100 – ₦500)</span>
     </div>
 
@@ -398,6 +398,13 @@
           <span class="field-hint">Tiered relaxation automatically kicks in if the strict floor starves the pool.</span>
         </div>
 
+        <div class="form-group">
+          <label for="input-min-legs">Min Accumulator Legs</label>
+          <input id="input-min-legs" class="input" type="number" min="8" max="25" value="10" />
+          <label for="input-max-leg-odds">Max Leg Odds</label>
+          <input id="input-max-leg-odds" class="input" type="number" min="1.10" max="1.50" step="0.01" value="1.45" />
+          <span class="field-hint">High-probability selections are not guaranteed. One losing leg loses the accumulator.</span>
+        </div>
         <div class="form-actions">
           <button class="btn btn-primary" id="btn-save-goals">Save Goals</button>
         </div>
@@ -482,7 +489,7 @@
       <div class="error-box" id="modal-setup-error" hidden></div>
 
       <p class="modal-desc">
-        Creates a new portfolio of 7 accumulators (Monday through Sunday in Africa/Lagos), each landing between 10.0 and 1000.0 odds.
+        Creates a new portfolio of 7 accumulators (Monday through Sunday in Africa/Lagos), each landing between 20.0 and 1000.0 odds.
       </p>
 
       <div class="form-group">

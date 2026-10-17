@@ -255,7 +255,7 @@ function renderWeekBoard() {
   }
 
   title.textContent = `Week of ${week.mondayDate} – ${week.sundayDate}`;
-  subtitle.textContent = `7 accumulators landing in 10.0 – 1000.0 odds (Africa/Lagos)`;
+  subtitle.textContent = `7 accumulators landing in 20.0 – 1000.0 odds (Africa/Lagos)`;
 
   const stats = week.stats;
   counterChip.textContent = `${stats.issuedCount} of 7 issued`;
@@ -389,7 +389,7 @@ function renderWeekBoard() {
 
         <div class="ticket-provider-line">
           ${provBadge}
-          <span>${s.legCount} legs · ${s.sports.join(', ')}</span>
+          <span>${s.legCount}-Leg High-Probability Accumulator · ${s.avgLegProbPct ?? 0}% avg modelled leg probability</span>
         </div>
       </div>
 
@@ -469,7 +469,7 @@ function renderTodayTicket() {
 
   settlePanel.hidden = false;
   const s = ticket.slip;
-  title.textContent = `${s.odds.toFixed(2)} Longshot Accumulator (${s.legCount} legs)`;
+  title.textContent = `${s.odds.toFixed(2)} ${s.legCount}-Leg Master Accumulator`;
 
   const isSim = ticket.provider?.used === 'sim' || ticket.provider?.fellBack;
   provLine.innerHTML = isSim
@@ -669,6 +669,8 @@ function renderSettingsTab() {
     keyStatus.style.color = 'var(--gold)';
   }
 
+  $('#input-min-legs').value = s.builder?.minLegs ?? 10;
+  $('#input-max-leg-odds').value = s.builder?.maxLegOdds ?? 1.45;
   goalSelect.value = String(s.goal || 2);
   edgeSelect.value = String(s.minEdgePerLeg !== undefined ? s.minEdgePerLeg : '0.012');
 
@@ -820,7 +822,7 @@ function setupEventListeners() {
       S.selectedDayIndex = res.week.todayIndex >= 0 ? res.week.todayIndex : 0;
       $('#modal-setup').hidden = true;
       renderAll();
-      toast('Weekly Portfolio Built', `${res.week.stats?.issuedCount || 7} tickets issued landing in 10.0–1000.0`, 'ok');
+      toast('Weekly Portfolio Built', `${res.week.stats?.issuedCount || 7} tickets issued landing in 20.0–1000.0`, 'ok');
     } catch (err) {
       errBox.hidden = false;
       errBox.textContent = `Build failed: ${err.message || err}`;
@@ -1006,11 +1008,15 @@ function setupEventListeners() {
   $('#btn-save-goals').addEventListener('click', async () => {
     const goal = Number($('#input-goal').value) || 2;
     const minEdge = Number($('#input-min-edge').value) || 0.012;
+    const builder = { ...(S.settings.builder || {}),
+      minLegs: Math.min(25, Math.max(8, Number($('#input-min-legs').value) || 10)),
+      maxLegOdds: Math.min(1.50, Math.max(1.10, Number($('#input-max-leg-odds').value) || 1.45)) };
     try {
       await api('/api/settings', {
         method: 'POST',
-        body: { goal, minEdgePerLeg: minEdge },
+        body: { goal, minEdgePerLeg: minEdge, builder },
       });
+      S.settings.builder = builder;
       S.settings.goal = goal;
       S.settings.minEdgePerLeg = minEdge;
       toast('Goals Updated', `Target set to ${goal} wins/week.`, 'ok');

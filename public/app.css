@@ -615,3 +615,6 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   .tickets-grid { grid-template-columns: 1fr; }
   .slip-stat-trio { flex-direction: column; }
 }
+
+/* Large accumulator slips remain readable without compressing price columns. */
+#input-min-legs, #input-max-leg-odds { width: 100%; margin: 8px 0 14px; }

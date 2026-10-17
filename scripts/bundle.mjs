@@ -233,7 +233,8 @@ if (process.argv.includes('--check')) {
   if (state.status !== 200) fail(`/api/state → ${state.status}`);
   if (state.body.runtime.persistent !== false) fail('the browser runtime must report persistent:false');
 
-  const created = await call('POST', '/api/weeks', { goal: 2 });
+  await call('POST', '/api/settings', { eventsPerDay: 120 });
+  const created = await call('POST', '/api/weeks', { goal: 2, weekDate: '2026-10-15' });
   if (created.status !== 201) fail(`/api/weeks → ${created.status} ${JSON.stringify(created.body)}`);
   const week = created.body.week;
 

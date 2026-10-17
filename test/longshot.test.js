@@ -301,8 +301,8 @@ describe('The Odds API v4 — Quota header capture', () => {
  * ────────────────────────────────────────────────────────────────── */
 describe('Ticket odds-band enforcement (reject < 10 and > 1000)', () => {
   it('strictly validates odds within [10.0, 1000.0]', () => {
-    assert.equal(validateTicketOdds(10.0).valid, true);
-    assert.equal(validateTicketOdds(15.5).valid, true);
+    assert.equal(validateTicketOdds(20.0).valid, true);
+    assert.equal(validateTicketOdds(19.99).valid, false);
     assert.equal(validateTicketOdds(100.0).valid, true);
     assert.equal(validateTicketOdds(1000.0).valid, true);
 
@@ -331,18 +331,12 @@ describe('Ticket odds-band enforcement (reject < 10 and > 1000)', () => {
   });
 
   it('builder produces slips whose odds strictly land inside [10.0, 1000.0]', () => {
-    const events = buildDayEvents('2026-10-15', { eventsPerDay: 40 });
-    const legs = [];
-    for (const e of events) {
-      const priced = priceEvent(e, { truthMarkets: e.markets }, { tier: e.league.tier });
-      legs.push(...extractLegs({ ...e, markets: priced.markets }));
-    }
-
+    const legs = accumulatorLegs();
     const result = buildLongshotTicket(legs, { minOdds: 10.0, maxOdds: 1000.0 });
     assert.equal(result.ok, true);
-    assert.ok(result.best.odds >= 10.0, `Ticket odds ${result.best.odds} must be >= 10.0`);
+    assert.ok(result.best.odds >= 20.0, `Ticket odds ${result.best.odds} must be >= 10.0`);
     assert.ok(result.best.odds <= 1000.0, `Ticket odds ${result.best.odds} must be <= 1000.0`);
-    assert.ok(result.best.legCount >= 2, 'Accumulator must combine >= 2 legs');
+    assert.ok(result.best.legCount >= 10, 'Accumulator must combine >= 2 legs');
   });
 });
 
@@ -500,7 +494,7 @@ describe('Weekly settlement & verdict strings', () => {
   });
 
   it('settling tickets updates running P&L and totalReturned in Naira', () => {
-    const week = createWeek({ goal: 2 });
+    const week = createWeek({ goal: 2, weekDate: '2026-10-15', settings: { eventsPerDay: 120 } });
     assert.equal(week.stats.wonCount, 0);
 
     const ticket0 = week.tickets[0];
@@ -534,13 +528,14 @@ describe('Vercel handler signature and API routes', () => {
 
   it('creates a week via POST /api/weeks and settles via POST /api/weeks/:id/tickets/:day/settle', async () => {
     const store = createMemoryStore();
+    await store.saveSettings({ eventsPerDay: 120 });
     const api = createApi({ store, persistent: false });
 
     const createRes = await api({
       method: 'POST',
       pathname: '/api/weeks',
       query: '',
-      body: { goal: 3 },
+      body: { goal: 3, weekDate: '2026-10-15' },
     });
     assert.equal(createRes.status, 201);
     const week = createRes.body.week;
@@ -554,5 +549,52 @@ describe('Vercel handler signature and API routes', () => {
     });
     assert.equal(settleRes.status, 200);
     assert.equal(settleRes.body.week.stats.wonCount, 1);
+  });
+});
+
+function accumulatorLegs(count = 24) {
+  return Array.from({ length: count }, (_, i) => ({
+    legId: `leg-${i}`, eventId: `event-${i}`, odds: 1.30, modelProb: 0.80,
+    edge: 0.80 - 1 / 1.30, confidence: 0.8, agreement: 0.9,
+    league: `League ${i}`, leagueCode: `L${i}`, kickoff: '2026-10-17T15:00:00Z',
+    sport: 'football', fairProb: 0.79, impliedProb: 1 / 1.30,
+  }));
+}
+
+describe('Master accumulator hard constraints', () => {
+  it('stacks 10–20 distinct high-probability events inside 20–1000 odds', () => {
+    const result = buildLongshotTicket(accumulatorLegs(), { minLegs: 10 });
+    assert.equal(result.ok, true);
+    const s = result.best;
+    assert.ok(s.legCount >= 10 && s.legCount <= 20);
+    assert.equal(new Set(s.legs.map(l => l.eventId)).size, s.legCount);
+    assert.ok(s.odds >= 20 && s.odds <= 1000);
+    assert.equal(s.avgLegProbPct, 80);
+    assert.ok(s.legs.every(l => l.odds <= 1.45 && l.modelProb >= 0.65 && l.edge > 0));
+  });
+  it('rejects underdogs, low probabilities, nonfinite data and nonpositive edge even with unsafe overrides', () => {
+    for (const bad of [{ odds: 1.56 }, { modelProb: 0.64 }, { odds: NaN },
+      { modelProb: NaN }, { edge: -0.01 }, { edge: 0 }]) {
+      const result = buildLongshotTicket(accumulatorLegs().map(l => ({ ...l, ...bad })),
+        { maxLegOdds: 99, minModelProb: 0, minLegs: 1 });
+      assert.equal(result.ok, false);
+    }
+  });
+  it('refuses insufficient events and impossible cumulative targets', () => {
+    assert.equal(buildLongshotTicket(accumulatorLegs(7)).ok, false);
+    assert.equal(buildLongshotTicket(accumulatorLegs(), { maxOdds: 19 }).ok, false);
+    assert.equal(buildLongshotTicket(accumulatorLegs().map(l => ({ ...l, eventId: 'same' }))).ok, false);
+  });
+  it('does not stop extending a partial slip before the configured minimum leg count', () => {
+    const r = buildLongshotTicket(accumulatorLegs(), { minLegs: 18 });
+    assert.equal(r.ok, true);
+    assert.equal(r.best.legCount, 18);
+  });
+  it('preserves double-chance fair probability mass instead of dividing it by two', () => {
+    const event = buildDayEvents('2026-10-15', { eventsPerDay: 120 }).find(e => e.sport === 'football');
+    const priced = priceEvent(event, { truthMarkets: event.markets });
+    const dc = priced.markets.find(m => m.type === 'double_chance');
+    assert.ok(Math.abs(dc.outcomes.reduce((n, o) => n + o.fairProb, 0) - 2) < 0.001);
+    assert.ok(dc.outcomes.some(o => o.modelProb >= 0.65));
   });
 });

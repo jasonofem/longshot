@@ -404,6 +404,22 @@ function footballTruth(event) {
     });
   }
 
+  for (const line of [1.5, 3.5, 4.5]) {
+    markets.push({ key: `ou${line * 10}`, name: `Total Goals Over/Under ${line}`,
+      type: 'totals', line, outcomes: [
+        { key: 'over', label: `Over ${line} goals`, p: pOver(line) },
+        { key: 'under', label: `Under ${line} goals`, p: 1 - pOver(line) },
+      ] });
+  }
+  for (const team of ['home', 'away']) {
+    const p = team === 'home' ? pHomeOver(0.5) : pAwayOver(0.5);
+    markets.push({ key: `${team}tg05`, name: `${event[team].name} Total Goals`,
+      type: 'team_total', line: 0.5, team, outcomes: [
+        { key: 'over', label: `${event[team].name} over 0.5`, p },
+        { key: 'under', label: `${event[team].name} under 0.5`, p: 1 - p },
+      ] });
+  }
+
   // Double chance — the classic rollover "safety" leg.
   markets.push({
     key: 'dc',
@@ -2034,6 +2050,7 @@ function priceEvent(event, truth, opts = {}) {
     const trueOutcomes = truthByKey.get(m.key) || ratings;
     if (!ratings) continue;
     const n = ratings.length;
+    const mass = m.type === 'double_chance' ? 2 : 1;
 
     // ---- each book forms its own noisy opinion of the truth -----------
     const errScale = bookErrorScale(event) * ineff;
@@ -2058,7 +2075,7 @@ function priceEvent(event, truth, opts = {}) {
       bookViews.push(biased);
       const margin = rng.range(prof.marginLo, prof.marginHi) * (tier >= 3 ? 1.22 : 1) * (0.85 + ineff * 0.15);
       const bSum = biased.reduce((a, c) => a + c, 0) || 1;
-      const k = (1 + margin) / bSum;
+      const k = mass * (1 + margin) / bSum;
       offers.push({ book: b, odds: biased.map((p) => roundOdds(1 / (p * k))) });
     }
 
@@ -2075,7 +2092,7 @@ function priceEvent(event, truth, opts = {}) {
     }
 
     // ---- de-vig across all books, and across the sharp subset ---------
-    const perBookFair = offers.map((off) => devig(off.odds).fair);
+    const perBookFair = offers.map((off) => devig(off.odds).fair.map((p) => p * (m.type === 'double_chance' ? 2 : 1)));
     const consensus = new Array(n).fill(0);
     for (const f of perBookFair) for (let i = 0; i < n; i++) consensus[i] += f[i];
     for (let i = 0; i < n; i++) consensus[i] /= perBookFair.length;
@@ -2095,7 +2112,7 @@ function priceEvent(event, truth, opts = {}) {
     const model = new Array(n).fill(0);
     for (let i = 0; i < n; i++) model[i] = w.consensus * consensus[i] + w.sharp * sharp[i] + w.ratings * ratingsP[i];
     const mSum = model.reduce((a, c) => a + c, 0) || 1;
-    for (let i = 0; i < n; i++) model[i] /= mSum;
+    for (let i = 0; i < n; i++) model[i] = model[i] / mSum * mass;
 
     // ---- per-outcome analytics ---------------------------------------
     const implied = bestOdds.map((o) => 1 / o);
@@ -2345,6 +2362,7 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
   for (const m of event.markets || []) {
     const raw = offersByMarket.get(m.key);
     const n = m.outcomes?.length || 0;
+    const mass = m.type === 'double_chance' ? 2 : 1;
     if (!raw?.length || !n) continue;
 
     /* A book that did not quote every outcome has to go. De-vigging two of three
@@ -2369,7 +2387,7 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
     if (bestOdds.some((o) => !(o > 1))) continue; // an outcome nobody priced
 
     // ---- de-vig every book, then across the sharp subset --------------
-    const perBookFair = offers.map((off) => devig(off.odds).fair);
+    const perBookFair = offers.map((off) => devig(off.odds).fair.map((p) => p * (m.type === 'double_chance' ? 2 : 1)));
     const consensus = new Array(n).fill(0);
     for (const f of perBookFair) for (let i = 0; i < n; i++) consensus[i] += f[i];
     for (let i = 0; i < n; i++) consensus[i] /= perBookFair.length;
@@ -2391,7 +2409,7 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
     const model = new Array(n).fill(0);
     for (let i = 0; i < n; i++) model[i] = w.consensus * consensus[i] + w.sharp * sharp[i] + w.ratings * ratingsP[i];
     const mSum = model.reduce((a, c) => a + c, 0) || 1;
-    for (let i = 0; i < n; i++) model[i] /= mSum;
+    for (let i = 0; i < n; i++) model[i] = model[i] / mSum * mass;
 
     const implied = bestOdds.map((o) => 1 / o);
     const outcomeRows = m.outcomes.map((o, i) => {
@@ -2480,8 +2498,8 @@ const confBand = __exp_24;
  *
  * MISSION & CONSTRAINTS
  * ---------------------
- * 1. Ticket combined odds must land in [10.0, 1000.0]. Any slip outside is rejected.
- * 2. Objective: MAXIMISE modelled ticket win probability subject to odds in [10.0, 1000.0]
+ * 1. Ticket combined odds must land in [20.0, 1000.0]. Any slip outside is rejected.
+ * 2. Objective: MAXIMISE modelled ticket win probability subject to odds in [20.0, 1000.0]
  *    and the edge floors.
  * 3. Never build max-odds lottery slips — higher odds drastically reduces win probability.
  * 4. Gated on edge floor (default +1.2pp) with tiered relaxation visible in the UI.
@@ -2496,7 +2514,7 @@ const confBand = __exp_24;
 
 
 
-const MIN_TICKET_ODDS = 10.0;
+const MIN_TICKET_ODDS = 20.0;
 const MAX_TICKET_ODDS = 1000.0;
 
 const DEFAULT_STAKE_BANDS = {
@@ -2511,13 +2529,15 @@ const DEFAULT_BUILDER_OPTS = {
   maxOdds: MAX_TICKET_ODDS,
   minEdgePerLeg: 0.012, // +1.2pp default
   minConfidence: 0.35,
-  minLegs: 2,
-  maxLegs: 8,
+  minLegs: 8,
+  maxLegs: 20,
+  maxLegOdds: 1.45,
+  minModelProb: 0.65,
   stakeBands: { ...DEFAULT_STAKE_BANDS },
   alternatives: 3,
 };
 
-/** Validate that odds strictly land within the longshot band [10.0, 1000.0]. */
+/** Validate that odds strictly land within the longshot band [20.0, 1000.0]. */
 function validateTicketOdds(odds) {
   const o = Number(odds);
   if (!Number.isFinite(o)) return { valid: false, reason: 'INVALID_NUMBER', message: 'Odds must be a finite number' };
@@ -2572,13 +2592,31 @@ function evaluateTicketConfidence(legs, customStakeBands = null) {
 }
 
 /**
- * Build a longshot slip maximizing modelled ticket win probability inside [10.0, 1000.0].
+ * Build a longshot slip maximizing modelled ticket win probability inside [20.0, 1000.0].
  *
  * @param {object[]} legs  Priced legs from extractLegs
  * @param {object}   opts  Overrides of DEFAULT_BUILDER_OPTS
  */
 function buildLongshotTicket(legs, opts = {}) {
+  const floor = Math.max(0, Number(opts.minEdgePerLeg ?? DEFAULT_BUILDER_OPTS.minEdgePerLeg));
+  let result;
+  for (const [threshold, label] of [[floor, 'strict'], [Math.min(floor, 0.004), 'relaxed'], [0, 'positive-edge only']]) {
+    result = searchTicket(legs, { ...opts, minEdgePerLeg: threshold });
+    if (result.ok) {
+      result.report.edgeTier = label;
+      result.best.edgeTier = label;
+      return result;
+    }
+  }
+  return result;
+}
+
+function searchTicket(legs, opts = {}) {
   const o = { ...DEFAULT_BUILDER_OPTS, ...opts };
+  o.minLegs = clamp(Math.trunc(Number(o.minLegs) || 8), 8, 25);
+  o.maxLegs = clamp(Math.trunc(Number(o.maxLegs) || 20), o.minLegs, 25);
+  o.maxLegOdds = clamp(Number(o.maxLegOdds) || 1.45, 1.10, 1.50);
+  o.minModelProb = clamp(Number(o.minModelProb) || 0.65, 0.65, 1);
   const minOdds = Math.max(MIN_TICKET_ODDS, Number(o.minOdds) || MIN_TICKET_ODDS);
   const maxOdds = Math.min(MAX_TICKET_ODDS, Number(o.maxOdds) || MAX_TICKET_ODDS);
 
@@ -2596,15 +2634,15 @@ function buildLongshotTicket(legs, opts = {}) {
   // Eligibility filter
   const pool = [];
   for (const leg of legs) {
-    if (leg.confidence < o.minConfidence && leg.viewSource !== 'pasted-single-book') {
+    if ((!Number.isFinite(leg.confidence) || leg.confidence < o.minConfidence) && leg.viewSource !== 'pasted-single-book') {
       report.rejected.confidence++;
       continue;
     }
-    if (leg.odds < 1.05 || leg.odds > maxOdds) {
+    if (!Number.isFinite(leg.odds) || leg.odds < 1.10 || leg.odds > o.maxLegOdds) {
       report.rejected.odds++;
       continue;
     }
-    if (leg.modelProb < 0.015) {
+    if (!Number.isFinite(leg.modelProb) || leg.modelProb < o.minModelProb || leg.modelProb > 1 || !Number.isFinite(leg.edge) || leg.edge <= 0 || leg.edge < o.minEdgePerLeg) {
       report.rejected.noise++;
       continue;
     }
@@ -2626,18 +2664,8 @@ function buildLongshotTicket(legs, opts = {}) {
     };
   }
 
-  // Group by event to enforce max one leg per event early
-  const byEvent = new Map();
-  for (const leg of pool) {
-    const cur = byEvent.get(leg.eventId);
-    // prefer higher edge, then higher modelProb
-    if (!cur || leg.edge > cur.edge || (Math.abs(leg.edge - cur.edge) < 0.002 && leg.modelProb > cur.modelProb)) {
-      byEvent.set(leg.eventId, leg);
-    }
-  }
-
-  const deduped = [...byEvent.values()];
-  deduped.sort((a, b) => b.modelProb - a.modelProb || b.edge - a.edge);
+  // Keep alternative markets: the highest-edge market need not form the best slip.
+  const deduped = pool.sort((a, b) => b.modelProb - a.modelProb || b.edge - a.edge);
 
   const logLo = Math.log(minOdds);
   const logHi = Math.log(maxOdds);
@@ -2687,11 +2715,11 @@ function buildLongshotTicket(legs, opts = {}) {
         }
 
         // Forward propagation for partial combos not yet at logLo
-        if (nlo < logLo) {
+        if (nlo < logLo || depth < o.minLegs) {
           const b = Math.floor(nlo / bucketWidth);
           const key = `${b}|${depth}`;
           const cur = buckets.get(key);
-          if (!cur || nlp > cur.logP) {
+          if (!cur || nlp + Math.log(correlationFactor(legsArr)) > cur.logP + Math.log(correlationFactor(cur.legs))) {
             buckets.set(key, { legs: legsArr, logOdds: nlo, logP: nlp, edgeSum: nEdge, events });
           }
         }
@@ -2730,7 +2758,7 @@ function buildLongshotTicket(legs, opts = {}) {
   let tierUsed = null;
 
   for (const t of tiers) {
-    const c = found.filter((x) => x.avgEdge >= t.floor);
+    const c = found.filter((x) => x.minLegEdge >= t.floor && x.minLegEdge > 0);
     if (c.length) {
       chosen = c;
       tierUsed = t;
@@ -2742,7 +2770,7 @@ function buildLongshotTicket(legs, opts = {}) {
     return {
       ok: false,
       reason: 'NO_TICKET',
-      message: 'The engine refused to issue a ticket: no combination in 10.0–1000.0 had positive edge. Refusing is a feature.',
+      message: 'The engine refused to issue a ticket: no combination in 20.0–1000.0 had positive edge. Refusing is a feature.',
       report,
       alternatives: [],
     };
@@ -2792,6 +2820,9 @@ function buildComboPayload(legs, odds, winProb, corr, edgeSum, stakeBands) {
   return {
     legs: legs.map(stripLeg),
     legCount: legs.length,
+    avgLegProb: mean(legs.map((l) => l.modelProb)),
+    avgLegProbPct: round(mean(legs.map((l) => l.modelProb)) * 100, 2),
+    minLegEdge: Math.min(...legs.map((l) => l.edge)),
     odds: cleanOdds,
     fairOdds,
     winProb: round(winProb, 4),
@@ -3524,7 +3555,7 @@ const clamp = __exp_6;
  * MISSION
  * -------
  * Every week (Monday–Sunday, Africa/Lagos) the engine issues 7 tickets, one per day.
- * Each ticket is an accumulator whose combined odds land in [10.0, 1000.0].
+ * Each ticket is an accumulator whose combined odds land in [20.0, 1000.0].
  * Stakes are ₦100–₦500 scaled by ticket confidence band (A: ₦500, B: ₦350, C: ₦200, D: ₦100).
  * Goal: 2–3 winning tickets out of 7 in a week.
  *
@@ -3578,12 +3609,12 @@ function assessGoal({ goal = 2, expectedWins = 0, issuedCount = 7 }) {
 
   let analysis = '';
   if (isStructurallyBelow) {
-    analysis = `Your target is ${g} wins/week. The modelled expectation at longshot odds (≥10.0) is ${expectedWins.toFixed(2)} wins (${(avgP * 100).toFixed(1)}% avg win rate). The engine treats your goal as an optimisation target, never as a promise. Hitting ${g} wins in 7 days at odds 10.0–1000.0 is an extraordinary week.`;
+    analysis = `Your target is ${g} wins/week. The modelled expectation at longshot odds (≥20.0) is ${expectedWins.toFixed(2)} wins (${(avgP * 100).toFixed(1)}% avg win rate). The engine treats your goal as an optimisation target, never as a promise. Hitting ${g} wins in 7 days at odds 20.0–1000.0 is an extraordinary week.`;
   } else {
     analysis = `Modelled expectation (${expectedWins.toFixed(2)} wins) meets or exceeds your goal of ${g} wins.`;
   }
 
-  const explanation = `To mathematically average ${g} expected wins across 7 tickets, tickets would require an average win probability of ${(pReq * 100).toFixed(1)}%, which corresponds to a shorter odds band around ${recommendedOddsBand} rather than longshot odds (≥10.0).`;
+  const explanation = `To mathematically average ${g} expected wins across 7 tickets, tickets would require an average win probability of ${(pReq * 100).toFixed(1)}%, which corresponds to a shorter odds band around ${recommendedOddsBand} rather than longshot odds (≥20.0).`;
 
   return {
     goal: g,
@@ -4018,6 +4049,7 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
         apiKey: key,
         sports,
         builder: {
+          ...(settings.builder || {}),
           stakeBands: settings.stakeBands || DEFAULT_STAKE_BANDS,
           minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
         },
@@ -4110,6 +4142,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
           marketInefficiency: settings.marketInefficiency ?? 1.2,
           manualOdds: settings.manualOdds || [],
           builder: {
+          ...(settings.builder || {}),
             stakeBands: settings.stakeBands || DEFAULT_STAKE_BANDS,
             minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
           },
@@ -4156,6 +4189,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
           apiKey,
           sports: settings.oddsApi?.sports || [],
           builder: {
+          ...(settings.builder || {}),
             stakeBands: settings.stakeBands || DEFAULT_STAKE_BANDS,
             minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
           },
@@ -4266,6 +4300,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
                 tz,
                 apiKey: key,
                 sports: settings.oddsApi?.sports || [],
+                builder: { ...(settings.builder || {}), stakeBands: settings.stakeBands, minEdgePerLeg: settings.minEdgePerLeg },
               });
               prepared = { scan: live.scan, builder: live.builder };
             } catch {}
@@ -4347,7 +4382,8 @@ const DEFAULT_SETTINGS = {
   tz: 'Africa/Lagos',
   goal: 2, // 2–3 winning tickets out of 7
   minEdgePerLeg: 0.012, // +1.2pp floor default
-  minOdds: 10.0,
+  builder: { minLegs: 10, maxLegs: 20, maxLegOdds: 1.45 },
+  minOdds: 20.0,
   maxOdds: 1000.0,
   stakeBands: {
     A: 500,
