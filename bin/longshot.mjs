@@ -99,7 +99,7 @@ async function main() {
     }
 
     console.log(`========================================================================`);
-    console.log(`  THE 7 TICKETS (COMBINED ODDS 10.0 – 1000.0)`);
+    console.log(`  THE 7 TICKETS (COMBINED ODDS 20.0 – 1000.0)`);
     console.log(`========================================================================\n`);
 
     for (const t of week.tickets) {
@@ -111,6 +111,7 @@ async function main() {
       }
 
       const s = t.slip;
+      console.log(`  ${s.legCount}-Leg Master Accumulator · ${s.avgLegProbPct}% avg modelled leg probability`);
       console.log(`  Combined Odds: ${s.odds.toFixed(2)}  |  Fair Odds: ${s.fairOdds.toFixed(2)}  |  Win Prob: ${s.winProbPct}% (1-in-${s.oneInX})`);
       console.log(`  Stake: ${formatNaira(s.stake)} [Band ${s.band}]  |  Total Edge: +${s.edgePct}%  |  EV: +${s.evPct}%`);
       console.log(`  Confidence Note: ${s.bandReason}`);

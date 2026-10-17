@@ -117,3 +117,31 @@ Tarball package can be served via:
 node download-server.cjs
 ```
 Listening on `0.0.0.0:8080`.
+
+### Master accumulator constraints (v2)
+
+The builder now stacks distinct events, rather than selecting long-priced underdogs.
+Engine defaults: 8–20 legs (maximum 25), individual odds 1.10–1.45, model
+probability at least 65%, combined odds 20–1000. Dashboard defaults to a
+10-leg minimum. The configurable price ceiling is capped at 1.50; unsafe
+caller overrides cannot admit underdogs. Each leg must clear the selected edge
+tier (+1.2pp, then +0.4pp, then strictly positive); odds and probability limits
+are never relaxed. The bucketed beam search approximates the maximum
+correlation-adjusted win probability; it is not an exhaustive optimizer.
+
+Football simulation includes double chance, totals 1.5/3.5/4.5 and team totals
+0.5, alongside existing markets. Overlapping double-chance probabilities are
+de-vigged with total mass 2, not 1. Live scans only use actual quoted markets:
+the current bulk Odds API integration requests h2h/totals/spreads and does not
+invent double-chance or alternate-total prices when those are unavailable.
+Additional live markets require provider-specific event-market fetching.
+
+A weekly board has seven daily slots, **not seven guaranteed issued slips**.
+If the available pool cannot form a qualifying accumulator, that day remains
+unissued. In particular, the default 38-event simulation may issue few tickets.
+Simulated prices are demonstrations, not live betting recommendations.
+High individual win probabilities are not guarantees: even 15 independent 80%
+legs win together only about 3.5% of the time, before correlation adjustments.
+The dashboard reports average leg probability separately from data-quality
+confidence/stake bands, and portfolio expected wins as the sum of slip win
+probabilities, never a promise of 2–3 wins.
