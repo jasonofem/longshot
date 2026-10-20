@@ -960,7 +960,7 @@ function setupEventListeners() {
     }
 
     try {
-      const res = await api(`/api/scan/live?date=${date}&apiKey=${encodeURIComponent(key)}`);
+      const res = await api('/api/scan/live', { method: 'POST', body: { date, apiKey: key } });
       S.marketScan = res;
       $('#market-scan-report').textContent = JSON.stringify({ date, diagnostics: res.diagnostics, builder: res.builder }, null, 2);
       if (res.quota) {

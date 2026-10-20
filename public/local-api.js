@@ -15,6 +15,7 @@ export const localApi = createApi({
   store: localStore,
   env: {},
   persistent: false,
+  liveScanner: proxyLiveScan,
 });
 
 export function storageInfo() {
@@ -75,3 +76,23 @@ function jsonSafe(key, value) {
 }
 
 export default localFetch;
+
+/** Local persistence does not require browser-to-provider network access. */
+export async function proxyLiveScan(date, options = {}) {
+  let res;
+  try {
+    res = await globalThis.fetch('/api/scan/live', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ date, apiKey: options.apiKey, sports: options.sports, builder: options.builder }),
+      signal: options.signal,
+    });
+  } catch {
+    throw Object.assign(new Error('Cannot reach the same-origin live scan service. Check your connection and server deployment; no direct-provider or simulated fallback was used.'), { code: 'LIVE_PROXY_UNREACHABLE' });
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.diagnostics || !data?.builder || !Array.isArray(data?.legs)) {
+    throw Object.assign(new Error(data?.error || 'Live scan service returned an invalid response. A server API deployment is required for live scans.'), { code: data?.code || 'LIVE_PROXY_INVALID_RESPONSE' });
+  }
+  return { ...data, scan: { dayKey: date, events: data.events, legs: data.legs, diagnostics: data.diagnostics } };
+}

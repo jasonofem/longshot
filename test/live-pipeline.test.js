@@ -211,14 +211,67 @@ test('beam keeps competing market/event combinations and honours configured 25 l
   assert.equal(new Set(r.best.legs.map(l => l.eventId)).size, 25);
 });
 
-test('browser localFetch bundle exposes complete live legs and error diagnostics', async () => {
+test('browser localFetch proxies live scans with settings in POST body', async () => {
   const { localFetch, localStore } = await import('../public/local-api.js');
-  await mock(async url => response(url.includes('/events/') ? extra() : [event()]), async key => {
+  const server = createApi({ store: createMemoryStore() });
+  let proxyCalls = 0;
+  await mock(async (url, options) => {
+    if (url === '/api/scan/live') {
+      proxyCalls++;
+      assert.equal(options.method, 'POST');
+      const payload = JSON.parse(options.body);
+      assert.deepEqual(payload.sports, [sport]);
+      const result = await server({ method: 'POST', pathname: url, body: payload, query: '' });
+      return response(result.body, result.status);
+    }
+    return response(url.includes('/events/') ? extra() : [event()]);
+  }, async key => {
     await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
     const res = await localFetch(`/api/scan/live?date=${date}`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.ok(body.legs.some(l => l.providerMarket === 'double_chance'));
     assert.equal(body.diagnostics.fixturesOnDate, 1);
+    assert.equal(proxyCalls, 1);
+  });
+});
+
+test('local week creation and both rescan paths never call provider directly', async () => {
+  const { localFetch, localStore } = await import('../public/local-api.js');
+  let requests = 0;
+  await mock(async (url, options) => {
+    assert.equal(url, '/api/scan/live');
+    const payload = JSON.parse(options.body);
+    requests++;
+    return response({ date: payload.date, events: [], legs: [], diagnostics: {
+      dayKey: payload.date, providerUsed: 'oddsapi', providerRequested: 'oddsapi', fellBack: false,
+    }, builder: { ok: false, reason: 'NO_EVENTS_FOR_DATE', message: 'No events', report: {} } });
+  }, async key => {
+    await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
+    const created = await localFetch('/api/weeks', { method: 'POST', body: { weekDate: date } });
+    const { week } = await created.json();
+    assert.equal(requests, 7);
+    assert.ok(week.tickets.every(t => !t.issued && t.provider.used === 'oddsapi'));
+    await localFetch(`/api/weeks/${week.id}/rescan`, { method: 'POST', body: { dayIndex: 2 } });
+    assert.equal(requests, 8);
+    await localFetch(`/api/weeks/${week.id}/rescan`, { method: 'POST', body: {} });
+    assert.equal(requests, 15);
+  });
+});
+
+test('proxy failure never falls back to direct provider or simulation', async () => {
+  const { proxyLiveScan, localFetch, localStore } = await import('../public/local-api.js');
+  await mock(async url => {
+    assert.equal(url, '/api/scan/live');
+    throw new TypeError('Failed to fetch');
+  }, async key => {
+    await assert.rejects(proxyLiveScan(date, { apiKey: key }), { code: 'LIVE_PROXY_UNREACHABLE' });
+    await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
+    const res = await localFetch('/api/weeks', { method: 'POST', body: { weekDate: date } });
+    const { week } = await res.json();
+    assert.ok(week.tickets.every(t => !t.issued && t.reasonCode === 'LIVE_PROXY_UNREACHABLE'));
+  });
+  await mock(async () => new Response('<html>Static host</html>', { status: 200 }), async () => {
+    await assert.rejects(proxyLiveScan(date), { code: 'LIVE_PROXY_INVALID_RESPONSE' });
   });
 });
