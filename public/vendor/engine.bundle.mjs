@@ -3203,11 +3203,13 @@ function failedLiveBoard(dayKey, err) {
 }
 
 async function fetchOddsApi(sports, apiKey, opts = {}) {
-  const { dayKey, signal, timeoutMs = 15000, maxEventRequests = 40, concurrency = 2, maxRetries = 2, retryDelayMs = 500, requestIntervalMs = 150 } = opts;
+  const { dayKey, signal, timeoutMs = 15000, maxEventRequests = 0, concurrency = 2, maxRetries = 2, retryDelayMs = 500, requestIntervalMs = 150 } = opts;
   const games = [], leagues = [], additional = [];
   const quota = { remaining: null, used: null };
   let fatal = null, rawFixtures = 0, nextRequestAt = 0, retriesLeft = 6;
-  const requestStats = { attempts: 0, rateLimits: 0, retries: 0 };
+  const creditBudget = Math.max(1, Math.min(30, Number(opts.maxCredits) || 30));
+  const requestStats = { attempts: 0, rateLimits: 0, retries: 0, reservedCredits: 0, creditBudget };
+  let budgetStopped = false;
   const wait = (ms, signal) => new Promise((resolve, reject) => {
     const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new Error('Request cancelled')); };
     const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
@@ -3236,6 +3238,12 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
         const scheduled = Math.max(Date.now(), nextRequestAt);
         nextRequestAt = scheduled + Math.max(0, requestIntervalMs);
         await wait(Math.max(0, scheduled - Date.now()), ctrl.signal);
+        const cost = params.markets ? params.markets.split(',').length : 0;
+        if (requestStats.reservedCredits + cost > creditBudget) {
+          budgetStopped = true;
+          throw Object.assign(new Error('Per-scan credit budget reached; remaining requests were not sent.'), { code: 'SCAN_BUDGET_REACHED' });
+        }
+        requestStats.reservedCredits += cost;
         requestStats.attempts++;
         const res = await fetch(url.href, { signal: ctrl.signal });
         for (const [field, header] of [['remaining', 'x-requests-remaining'], ['used', 'x-requests-used']]) {
@@ -3287,14 +3295,14 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
         active.filter(x => x.active && x.key.startsWith(s.key + '_')).map(x => ({ ...s, key: x.key, league: x.title })));
     } catch (err) { additional.push({ stage: 'sports-discovery', code: err.code, message: err.message }); }
   }
-  const params = { regions: 'eu,uk,us', markets: 'h2h,totals,spreads', oddsFormat: 'decimal', dateFormat: 'iso' };
+  const params = { regions: 'uk', markets: 'h2h,totals,spreads', oddsFormat: 'decimal', dateFormat: 'iso' };
   if (dayKey) {
     const start = Date.parse(`${dayKey}T00:00:00+01:00`);
     params.commenceTimeFrom = new Date(start).toISOString().replace('.000Z', 'Z');
     params.commenceTimeTo = new Date(start + 86400000 - 1000).toISOString().replace('.000Z', 'Z');
   }
   for (const meta of selected) {
-    if (fatal || quota.remaining === 0) { leagues.push({ key: meta.key, ok: false, code: fatal?.code || 'QUOTA_EXHAUSTED' }); continue; }
+    if (budgetStopped || fatal || quota.remaining === 0) { leagues.push({ key: meta.key, ok: false, code: budgetStopped ? 'SCAN_BUDGET_REACHED' : fatal?.code || 'QUOTA_EXHAUSTED' }); continue; }
     try {
       const data = await request(`${meta.key}/odds`, params);
       if (!Array.isArray(data)) throw new Error('Malformed provider fixture response');
@@ -3311,11 +3319,11 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
   let cursor = 0;
   if (dayKey) await Promise.all(Array.from({ length: Math.max(1, Math.min(6, concurrency)) }, async () => {
     while (cursor < Math.min(unique.length, maxEventRequests)) {
-      if (fatal || (quota.remaining !== null && quota.remaining < 15)) break;
+      if (budgetStopped || fatal || (quota.remaining !== null && quota.remaining < 5)) break;
       const g = unique[cursor++];
       try {
         const markets = g._meta.sport === 'football' ? 'double_chance,alternate_totals,team_totals,alternate_team_totals,alternate_spreads' : 'alternate_totals,alternate_spreads';
-        const data = await request(`${g._meta.key}/events/${g.id}/odds`, { regions: 'eu,uk,us', markets, oddsFormat: 'decimal', dateFormat: 'iso' });
+        const data = await request(`${g._meta.key}/events/${g.id}/odds`, { regions: 'uk', markets, oddsFormat: 'decimal', dateFormat: 'iso' });
         for (const book of data.bookmakers || []) {
           const existing = g.bookmakers?.find(b => (b.key || b.title) === (book.key || book.title));
           if (existing) existing.markets = [...existing.markets, ...book.markets];
@@ -4173,7 +4181,10 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
 
   const boards = {};
   const sports = settings.oddsApi?.sports || [];
-  const daysToFetch = weekDays || [];
+  const scanDate = body.scanDate || body.weekDate || tzDateKey(new Date(), 'Africa/Lagos');
+  const daysToFetch = (weekDays || []).filter(day => day.date === scanDate);
+  for (const day of weekDays || []) if (day.date !== scanDate) boards[day.date] = failedLiveBoard(day.date,
+    { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits. Select this day and explicitly rescan when needed.' });
 
   for (const day of daysToFetch) {
     try {
@@ -4181,6 +4192,7 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
         tz: settings.tz,
         apiKey: key,
         sports,
+        maxEventRequests: body.additionalMarkets === true ? 3 : 0,
         builder: {
           ...(settings.builder || {}),
           stakeBands: settings.stakeBands || DEFAULT_STAKE_BANDS,
@@ -4327,6 +4339,7 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
         const live = await liveScanner(date, {
           tz,
           apiKey,
+          maxEventRequests: body.additionalMarkets === true ? 3 : 0,
           sports: Array.isArray(body.sports) ? body.sports : settings.oddsApi?.sports || [],
           builder: {
           ...(settings.builder || {}),
@@ -4443,6 +4456,7 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
                 tz,
                 apiKey: key,
                 sports: settings.oddsApi?.sports || [],
+                maxEventRequests: body.additionalMarkets === true ? 3 : 0,
                 builder: { ...(settings.builder || {}), stakeBands: settings.stakeBands, minEdgePerLeg: settings.minEdgePerLeg },
               });
               prepared = { scan: live.scan, builder: live.builder };
@@ -4452,6 +4466,7 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
 
         rescanDayTicket(week, dayIndex, settings, prepared);
       } else {
+        if (settings.provider === 'oddsapi') return { status: 400, body: { code: 'SELECT_DAY_REQUIRED', error: 'Full-week live scanning is disabled to protect credits. Select one day to rescan.' } };
         // Rescan entire week
         const lagosWeek = getLagosWeek(week.mondayDate, tz);
         const liveBoards = await livePreparedForWeek(env, body, settings, lagosWeek.days, body.liveBoards, liveScanner);

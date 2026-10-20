@@ -137,31 +137,11 @@ async function loadState() {
 
     // Auto-create initial week if none exists
     if (!S.activeWeek) {
-      await autoCreateInitialWeek();
+      // Do not spend provider credits automatically on page load.
     }
   } catch (err) {
     console.error('Failed to load state:', err);
     toast('Error loading engine state', err.message, 'err');
-  }
-}
-
-async function autoCreateInitialWeek() {
-  try {
-    const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
-    const res = await api('/api/weeks', {
-      method: 'POST',
-      body: {
-        goal: S.settings.goal || 2,
-        apiKey: key,
-      },
-    });
-    if (res.week) {
-      S.activeWeek = res.week;
-      S.selectedDayIndex = res.week.todayIndex >= 0 ? res.week.todayIndex : 0;
-      renderAll();
-    }
-  } catch (err) {
-    console.error('Auto week creation error:', err);
   }
 }
 
@@ -815,7 +795,8 @@ function setupEventListeners() {
       const goal = Number($('#modal-goal-select').value) || 2;
       const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
 
-      const body = { weekDate, goal, provider, apiKey: key };
+      if (provider === 'oddsapi' && !confirm('Fetch quotes for the selected date only? Up to 30 credits may be spent even if no ticket qualifies. Other days will remain unscanned.')) return;
+      const body = { weekDate, goal, provider, apiKey: key, scanDate: weekDate };
 
       const res = await api('/api/weeks', { method: 'POST', body });
       S.activeWeek = res.week;
@@ -835,6 +816,7 @@ function setupEventListeners() {
 
   // Rescan Week Action
   $('#btn-rescan-week').addEventListener('click', async () => {
+    if (S.settings?.provider === 'oddsapi') { toast('Select one day', 'Full-week live rescanning is disabled to protect API credits.', 'warn'); return; }
     const btn = $('#btn-rescan-week');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
@@ -860,6 +842,7 @@ function setupEventListeners() {
 
   // Rescan Single Ticket
   $('#btn-rescan-single-ticket').addEventListener('click', async () => {
+    if (S.settings?.provider === 'oddsapi' && !confirm('Scan selected day? Up to 30 credits; no ticket is guaranteed. Extra event markets are disabled for this scan.')) return;
     const btn = $('#btn-rescan-single-ticket');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
@@ -943,6 +926,7 @@ function setupEventListeners() {
 
   // Live scan in Market Tab
   $('#btn-scan-live').addEventListener('click', async () => {
+    if (!confirm('Scan this date? Up to 30 credits may be spent even without an issued ticket. Only UK-region quotes are fetched.')) return;
     const btn = $('#btn-scan-live');
     const originalText = btn.textContent;
     btn.disabled = true;
@@ -960,7 +944,7 @@ function setupEventListeners() {
     }
 
     try {
-      const res = await api('/api/scan/live', { method: 'POST', body: { date, apiKey: key } });
+      const res = await api('/api/scan/live', { method: 'POST', body: { date, apiKey: key, additionalMarkets: $('#scan-additional-markets').checked } });
       S.marketScan = res;
       $('#market-scan-report').textContent = JSON.stringify({ date, diagnostics: res.diagnostics, builder: res.builder }, null, 2);
       if (res.quota) {

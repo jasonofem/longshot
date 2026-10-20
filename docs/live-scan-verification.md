@@ -37,3 +37,15 @@ HTTP 429 alone now means `RATE_LIMITED`, not exhausted credits. `OUT_OF_USAGE_CR
 Failed event enrichment records partial coverage and the provider error code, but rate limiting does not terminate all later enrichment or overwrite the builder refusal. Failed/successful sport and event coverage remains separately visible. Concurrent quota updates retain the lowest remaining and highest used counts seen during the scan.
 
 Verification: build passed; 48 tests passed, including a recovered 429 with 425 remaining, an exhausted retry budget on one event while another succeeds, long Retry-After handling, and explicit zero-credit exhaustion. No real provider requests were made from this workspace.
+
+## Credit protection after user-reported monthly exhaustion
+
+This supersedes the earlier multi-region and automatic-week scan behaviour:
+
+- Page load no longer auto-creates or scans a portfolio.
+- A live week build fetches only the selected reference date. Other days are explicitly `NOT_SCANNED`; full-week live rescans are rejected by the API. The CLI live-week command also only scans its selected date.
+- Each scan uses one region (UK) and a conservative maximum 30-credit request budget. Reservations use requested market count and include every retry; no request is sent if it would exceed the budget. Actual provider charges can be lower. This is a per-scan cap, not a shared monthly account budget: separate explicitly requested scans can each spend credits.
+- Event-specific requests default to zero. The market tab offers explicit opt-in for at most three events, still within the same budget. Sports/markets left out are disclosed in coverage diagnostics.
+- Browser actions show a spending confirmation stating that no issued ticket is guaranteed.
+
+Verification: 51 tests pass, including zero default enrichment, single-region requests, budget enforcement for initial requests/retries, one-day week creation, and rejection of full-week rescan without network calls. Build and weekly CLI smoke verification also pass. No actual provider calls were made; these safeguards cannot restore spent credits or ensure an eligible ticket exists.
