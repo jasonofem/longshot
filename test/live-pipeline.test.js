@@ -70,7 +70,7 @@ test('moneyline never manufactures a double-chance quote', async () => {
 
 for (const [status, code] of [[401, 'AUTHENTICATION_FAILURE'], [429, 'QUOTA_EXHAUSTED']]) {
   test(`${status} is distinct and never simulated`, async () => {
-    await mock(async () => response({}, status), async key => {
+    await mock(async () => response(status === 429 ? { error_code: 'OUT_OF_USAGE_CREDITS' } : {}, status), async key => {
       const r = await scanDayLive(date, opts(key));
       assert.equal(r.builder.reason, code);
       assert.equal(r.diagnostics.providerUsed, 'oddsapi');
@@ -83,7 +83,7 @@ test('one sport timeout does not abort subsequent sport requests', async () => {
   await mock((url, options) => url.includes('soccer_epl') ? new Promise((resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new Error('aborted')));
   }) : Promise.resolve(response([event()])), async key => {
-    const r = await fetchOddsApi(['soccer_epl', sport], key, { timeoutMs: 5 });
+    const r = await fetchOddsApi(['soccer_epl', sport], key, { timeoutMs: 5, requestIntervalMs: 0 });
     assert.equal(r.leagues[0].code, 'PROVIDER_TIMEOUT');
     assert.equal(r.leagues[1].ok, true);
     assert.equal(r.games.length, 1);
@@ -273,5 +273,61 @@ test('proxy failure never falls back to direct provider or simulation', async ()
   });
   await mock(async () => new Response('<html>Static host</html>', { status: 200 }), async () => {
     await assert.rejects(proxyLiveScan(date), { code: 'LIVE_PROXY_INVALID_RESPONSE' });
+  });
+});
+
+test('429 with credits remaining retries and resumes all event enrichment', async () => {
+  const attempts = new Map();
+  await mock(async url => {
+    if (!url.includes('/events/')) return response([event('r1'), event('r2'), event('r3')], 200, { 'x-requests-remaining': '425', 'x-requests-used': '75' });
+    const count = (attempts.get(url) || 0) + 1; attempts.set(url, count);
+    if (url.includes('/r1/') && count === 1) return response({ error_code: 'TOO_MANY_REQUESTS' }, 429,
+      { 'retry-after': '0', 'x-requests-remaining': '425' });
+    return response(extra());
+  }, async key => {
+    const r = await scanDayLive(date, { ...opts(key), requestIntervalMs: 0, retryDelayMs: 0 });
+    assert.equal(r.quota.remaining, 425);
+    assert.equal(r.diagnostics.requestStats.retries, 1);
+    assert.equal(r.diagnostics.requestStats.rateLimits, 1);
+    assert.equal(r.diagnostics.additionalMarkets.filter(x => x.ok).length, 3);
+    assert.equal(r.diagnostics.eventRequestsSkipped, 0);
+    assert.notEqual(r.builder.reason, 'QUOTA_EXHAUSTED');
+  });
+});
+
+test('persistent event 429 is partial coverage, not a fatal quota error or builder override', async () => {
+  let attempts = 0;
+  await mock(async url => {
+    if (!url.includes('/events/')) return response([event('limited'), event('available')]);
+    if (url.includes('/limited/')) {
+      attempts++;
+      return response({ error_code: 'TOO_MANY_REQUESTS' }, 429, { 'x-requests-remaining': '425' });
+    }
+    return response(extra());
+  }, async key => {
+    const r = await scanDayLive(date, { ...opts(key), requestIntervalMs: 0, retryDelayMs: 0 });
+    assert.equal(attempts, 3);
+    assert.equal(r.diagnostics.partialCoverage, true);
+    assert.equal(r.diagnostics.eventRequestsSkipped, 0);
+    assert.equal(r.diagnostics.coverageWarnings[0].code, 'RATE_LIMITED');
+    assert.equal(r.diagnostics.coverageWarnings[0].providerCode, 'TOO_MANY_REQUESTS');
+    assert.equal(r.builder.reason, 'INSUFFICIENT_ELIGIBLE_EVENTS');
+    assert.equal(r.builder.report.outcome, r.builder.reason);
+    assert.ok(r.diagnostics.additionalMarkets.some(x => x.eventId === 'available' && x.ok));
+  });
+});
+
+test('long Retry-After is disclosed without retrying early; zero credits is distinct', async () => {
+  let count = 0;
+  await mock(async () => { count++; return response({}, 429, { 'retry-after': '60', 'x-requests-remaining': '425' }); }, async key => {
+    const r = await scanDayLive(date, { ...opts(key), requestIntervalMs: 0 });
+    assert.equal(count, 1);
+    assert.equal(r.builder.reason, 'RATE_LIMITED');
+    assert.equal(r.leagues[0].retryAfterMs, 60000);
+  });
+  await mock(async () => response({}, 429, { 'x-requests-remaining': '0' }), async key => {
+    const r = await scanDayLive(date, { ...opts(key), requestIntervalMs: 0 });
+    assert.equal(r.builder.reason, 'QUOTA_EXHAUSTED');
+    assert.equal(r.diagnostics.requestStats.retries, 0);
   });
 });

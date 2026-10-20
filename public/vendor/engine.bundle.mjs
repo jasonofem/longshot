@@ -3162,6 +3162,9 @@ async function scanDayLive(dayKey, opts = {}) {
     sportsFailed: fetched.leagues.filter(l => !l.ok).length,
     rawFixtures: fetched.rawFixtures, fixturesOnDate: games.length,
     fixturesWithQuotes: scan.events.length, extractedSelections: scan.legs.length,
+    requestStats: fetched.requestStats,
+    partialCoverage: fetched.leagues.some(l => !l.ok) || fetched.additional.some(l => l.ok === false || l.code) || fetched.eventRequestsSkipped > 0,
+    coverageWarnings: [...fetched.leagues, ...fetched.additional].filter(l => l.code).map(l => ({ code: l.code, sport: l.key, eventId: l.eventId, providerCode: l.providerCode, retryAfterMs: l.retryAfterMs })),
     additionalMarkets: fetched.additional, eventRequestsSkipped: fetched.eventRequestsSkipped,
     availableMarketTypes: [...new Set(scan.legs.map(l => l.providerMarket || l.marketType))], builder: builderResult.report });
   const coverageFailure = !fetched.leagues.some(l => l.ok) && fetched.leagues.find(l => l.code);
@@ -3169,6 +3172,7 @@ async function scanDayLive(dayKey, opts = {}) {
     message: 'No events returned for the selected Lagos date. Past events require historical access; advance odds may not yet be published.' } :
     !scan.legs.length ? { code: 'MARKETS_UNAVAILABLE', message: 'Fixtures found but no complete usable bookmaker markets were returned.' } : null);
   if (failure) Object.assign(builderResult, { ok: false, best: null, reason: failure.code, message: failure.message });
+  if (scan.diagnostics.partialCoverage && !builderResult.ok) builderResult.message += ' This result is based on incomplete provider coverage; see coverage warnings and skipped requests.';
   scan.diagnostics.reasonCode = builderResult.reason || 'ISSUED';
   builderResult.report.outcome = scan.diagnostics.reasonCode;
 
@@ -3199,10 +3203,17 @@ function failedLiveBoard(dayKey, err) {
 }
 
 async function fetchOddsApi(sports, apiKey, opts = {}) {
-  const { dayKey, signal, timeoutMs = 15000, maxEventRequests = 40, concurrency = 3 } = opts;
+  const { dayKey, signal, timeoutMs = 15000, maxEventRequests = 40, concurrency = 2, maxRetries = 2, retryDelayMs = 500, requestIntervalMs = 150 } = opts;
   const games = [], leagues = [], additional = [];
   const quota = { remaining: null, used: null };
-  let fatal = null, rawFixtures = 0;
+  let fatal = null, rawFixtures = 0, nextRequestAt = 0, retriesLeft = 6;
+  const requestStats = { attempts: 0, rateLimits: 0, retries: 0 };
+  const wait = (ms, signal) => new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new Error('Request cancelled')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
   async function request(path, params = {}) {
     const url = new URL(`https://api.the-odds-api.com/v4/sports/${path}`);
     url.search = new URLSearchParams({ apiKey, ...params });
@@ -3221,20 +3232,44 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
       signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(abort, timeoutMs);
       try {
+        for (let attempt = 0; ; attempt++) {
+        const scheduled = Math.max(Date.now(), nextRequestAt);
+        nextRequestAt = scheduled + Math.max(0, requestIntervalMs);
+        await wait(Math.max(0, scheduled - Date.now()), ctrl.signal);
+        requestStats.attempts++;
         const res = await fetch(url.href, { signal: ctrl.signal });
         for (const [field, header] of [['remaining', 'x-requests-remaining'], ['used', 'x-requests-used']]) {
           const v = res.headers?.get(header);
-          if (v != null) quota[field] = Number(v);
+          if (v != null && Number.isFinite(Number(v))) {
+            const value = Number(v);
+            quota[field] = quota[field] == null ? value : field === 'remaining' ? Math.min(quota[field], value) : Math.max(quota[field], value);
+          }
         }
         if (!res.ok) {
           const errorBody = await res.json().catch(() => ({}));
-          const code = errorBody.error_code === 'OUT_OF_USAGE_CREDITS' ? 'QUOTA_EXHAUSTED' : res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 429 ? 'QUOTA_EXHAUSTED' : res.status === 403 ? 'MARKETS_UNAVAILABLE' : 'PROVIDER_ERROR';
-          throw Object.assign(new Error(`${code}: provider HTTP ${res.status}`), { code, status: res.status });
+          const code = (errorBody.error_code === 'OUT_OF_USAGE_CREDITS' || (res.status === 429 && res.headers?.get('x-requests-remaining') === '0')) ? 'QUOTA_EXHAUSTED' : res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 429 ? 'RATE_LIMITED' : res.status === 403 ? 'MARKETS_UNAVAILABLE' : 'PROVIDER_ERROR';
+          const retryHeader = res.headers?.get('retry-after');
+          const retryAfterMs = retryHeader == null ? null : Number.isFinite(Number(retryHeader))
+            ? Math.max(0, Number(retryHeader) * 1000) : Math.max(0, Date.parse(retryHeader) - Date.now());
+          if (code === 'RATE_LIMITED') {
+            requestStats.rateLimits++;
+            const delay = Math.max(retryDelayMs * 2 ** attempt, retryAfterMs || 0);
+            if (attempt < Math.min(2, Math.max(0, maxRetries)) && retriesLeft > 0 && delay <= 5000) {
+              retriesLeft--; requestStats.retries++;
+              nextRequestAt = Math.max(nextRequestAt, Date.now() + delay);
+              continue;
+            }
+          }
+          throw Object.assign(new Error(`${code}: provider HTTP ${res.status}`), {
+            code, status: res.status, providerCode: errorBody.error_code || null,
+            retryAfterMs: Number.isFinite(retryAfterMs) ? retryAfterMs : null,
+          });
         }
         const data = await res.json();
         if (QUOTE_CACHE.size > 300) QUOTE_CACHE.clear();
         QUOTE_CACHE.set(key, { data, quota: { ...quota }, expires: Date.now() + 60000 });
         return data;
+        }
       } catch (err) {
         if (ctrl.signal.aborted) throw Object.assign(new Error('Provider request timed out or was cancelled.'), { code: 'PROVIDER_TIMEOUT' });
         throw err;
@@ -3268,7 +3303,7 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
       for (const g of data) if (!dayKey || tzDateKey(new Date(g.commence_time), 'Africa/Lagos') === dayKey)
         games.push({ ...structuredClone(g), _meta: meta });
     } catch (err) {
-      leagues.push({ key: meta.key, ok: false, status: err.status, code: err.code || 'NETWORK_ERROR' });
+      leagues.push({ key: meta.key, ok: false, status: err.status, code: err.code || 'NETWORK_ERROR', providerCode: err.providerCode, retryAfterMs: err.retryAfterMs });
       if (['AUTHENTICATION_FAILURE', 'QUOTA_EXHAUSTED'].includes(err.code)) fatal = err;
     }
   }
@@ -3288,13 +3323,13 @@ async function fetchOddsApi(sports, apiKey, opts = {}) {
         }
         additional.push({ eventId: g.id, ok: true });
       } catch (err) {
-        additional.push({ eventId: g.id, ok: false, code: err.code || 'NETWORK_ERROR' });
+        additional.push({ eventId: g.id, ok: false, code: err.code || 'NETWORK_ERROR', providerCode: err.providerCode, retryAfterMs: err.retryAfterMs });
         if (['AUTHENTICATION_FAILURE', 'QUOTA_EXHAUSTED'].includes(err.code)) fatal = err;
       }
     }
   }));
   return { games: unique.map(g => normaliseOddsApiGame(g, g._meta)), quota, leagues, additional,
-    rawFixtures, fatal, eventRequestsSkipped: Math.max(0, unique.length - cursor) };
+    rawFixtures, fatal, requestStats, eventRequestsSkipped: Math.max(0, unique.length - cursor) };
 }
 
 function normaliseOddsApiGame(g, meta) {
@@ -3464,7 +3499,7 @@ function scanLiveGames(dayKey, games, opts = {}) {
       bookQuotes: pricesQuoted,
       skippedNotOnDay,
       truthKnown: false,
-      scope: 'h2h + totals + spreads from cross-book agreement',
+      scope: 'Actual quoted bulk and event-specific markets; de-vigged cross-book estimates',
       fetchedAt: new Date().toISOString(),
     },
   };
