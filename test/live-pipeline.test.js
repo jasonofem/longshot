@@ -28,7 +28,7 @@ async function mock(fn, run) {
   globalThis.fetch = fn;
   try { return await run(`mock-${++serial}`); } finally { globalThis.fetch = original; }
 }
-const opts = apiKey => ({ apiKey, sports: [sport] });
+const opts = apiKey => ({ apiKey, sports: [sport], maxEventRequests: 3 });
 
 test('Lagos boundaries and ISO query; enrich only selected-day events', async () => {
   const calls = [];
@@ -163,7 +163,7 @@ test('server and browser-local shared API persist selected-date refusal report, 
       const created = await call('POST', '/api/weeks', { weekDate: date, provider: 'oddsapi' });
       assert.equal(created.status, 201);
       const week = created.body.week;
-      assert.ok(week.tickets.every(t => !t.issued && t.reasonCode === 'AUTHENTICATION_FAILURE' && t.builderReport));
+      assert.ok(week.tickets.every(t => !t.issued && ['AUTHENTICATION_FAILURE', 'NOT_SCANNED'].includes(t.reasonCode) && t.builderReport));
       const rescanned = await call('POST', `/api/weeks/${week.id}/rescan`, { dayIndex: 2 });
       assert.equal(rescanned.body.week.tickets[2].scanDiagnostics.dayKey, week.tickets[2].date);
       const state = await call('GET', '/api/state');
@@ -227,7 +227,7 @@ test('browser localFetch proxies live scans with settings in POST body', async (
     return response(url.includes('/events/') ? extra() : [event()]);
   }, async key => {
     await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
-    const res = await localFetch(`/api/scan/live?date=${date}`);
+    const res = await localFetch('/api/scan/live', { method: 'POST', body: { date, additionalMarkets: true } });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.ok(body.legs.some(l => l.providerMarket === 'double_chance'));
@@ -250,12 +250,12 @@ test('local week creation and both rescan paths never call provider directly', a
     await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
     const created = await localFetch('/api/weeks', { method: 'POST', body: { weekDate: date } });
     const { week } = await created.json();
-    assert.equal(requests, 7);
+    assert.equal(requests, 1);
     assert.ok(week.tickets.every(t => !t.issued && t.provider.used === 'oddsapi'));
     await localFetch(`/api/weeks/${week.id}/rescan`, { method: 'POST', body: { dayIndex: 2 } });
-    assert.equal(requests, 8);
+    assert.equal(requests, 2);
     await localFetch(`/api/weeks/${week.id}/rescan`, { method: 'POST', body: {} });
-    assert.equal(requests, 15);
+    assert.equal(requests, 2);
   });
 });
 
@@ -269,7 +269,7 @@ test('proxy failure never falls back to direct provider or simulation', async ()
     await localStore.saveSettings({ provider: 'oddsapi', oddsApi: { key, sports: [sport] } });
     const res = await localFetch('/api/weeks', { method: 'POST', body: { weekDate: date } });
     const { week } = await res.json();
-    assert.ok(week.tickets.every(t => !t.issued && t.reasonCode === 'LIVE_PROXY_UNREACHABLE'));
+    assert.ok(week.tickets.every(t => !t.issued && ['LIVE_PROXY_UNREACHABLE', 'NOT_SCANNED'].includes(t.reasonCode)));
   });
   await mock(async () => new Response('<html>Static host</html>', { status: 200 }), async () => {
     await assert.rejects(proxyLiveScan(date), { code: 'LIVE_PROXY_INVALID_RESPONSE' });
@@ -330,4 +330,57 @@ test('long Retry-After is disclosed without retrying early; zero credits is dist
     assert.equal(r.builder.reason, 'QUOTA_EXHAUSTED');
     assert.equal(r.diagnostics.requestStats.retries, 0);
   });
+});
+
+test('default scanner never enriches events and uses one region', async () => {
+  let calls = 0;
+  await mock(async url => {
+    calls++;
+    assert.equal(new URL(url).searchParams.get('regions'), 'uk');
+    assert.ok(!url.includes('/events/'));
+    return response([event()]);
+  }, async key => {
+    const r = await scanDayLive(date, { apiKey: key, sports: [sport] });
+    assert.equal(calls, 1);
+    assert.equal(r.diagnostics.requestStats.reservedCredits, 3);
+  });
+});
+
+test('credit budget stops bulk and enrichment requests including retry reservations', async () => {
+  let calls = 0;
+  await mock(async url => {
+    calls++;
+    return response(url.includes('/events/') ? extra() : [event()]);
+  }, async key => {
+    const r = await fetchOddsApi([sport, 'soccer_epl'], key, { dayKey: date, maxCredits: 3, maxEventRequests: 40, requestIntervalMs: 0 });
+    assert.equal(calls, 1);
+    assert.equal(r.requestStats.reservedCredits, 3);
+    assert.ok(r.leagues.some(l => l.code === 'SCAN_BUDGET_REACHED'));
+  });
+  calls = 0;
+  await mock(async () => { calls++; return response({ error_code: 'TOO_MANY_REQUESTS' }, 429); }, async key => {
+    const r = await fetchOddsApi([sport], key, { maxCredits: 3, requestIntervalMs: 0, retryDelayMs: 0 });
+    assert.equal(calls, 1);
+    assert.equal(r.requestStats.reservedCredits, 3);
+  });
+});
+
+test('live week scans one date and rejects full-week rescan without any provider calls', async () => {
+  const store = createMemoryStore();
+  await store.saveSettings({ provider: 'oddsapi', oddsApi: { key: 'test-budget', sports: [sport] } });
+  const dates = [];
+  const api = createApi({ store, liveScanner: async (day, options) => {
+    dates.push(day);
+    assert.equal(options.maxEventRequests, 0);
+    return { scan: { diagnostics: { providerUsed: 'oddsapi' } }, builder: { ok: false, reason: 'NO_EVENTS_FOR_DATE', message: 'No events', report: {} } };
+  } });
+  const created = await api({ method: 'POST', pathname: '/api/weeks', body: { weekDate: date }, query: '' });
+  assert.deepEqual(dates, [date]);
+  assert.equal(created.body.week.tickets.filter(t => t.reasonCode === 'NOT_SCANNED').length, 6);
+  const rescan = await api({ method: 'POST', pathname: `/api/weeks/${created.body.week.id}/rescan`, body: {}, query: '' });
+  assert.equal(rescan.status, 400);
+  assert.equal(rescan.body.code, 'SELECT_DAY_REQUIRED');
+  assert.deepEqual(dates, [date]);
+  await api({ method: 'GET', pathname: '/api/state', query: '' });
+  assert.deepEqual(dates, [date]);
 });

@@ -11,7 +11,7 @@
 
 import { parseArgs } from 'node:util';
 import { createWeek, settleTicket, formatNaira, computeWeekStats } from '../lib/longshot.js';
-import { scanForDay, scanDayLive } from '../lib/scan.js';
+import { scanForDay, scanDayLive, failedLiveBoard } from '../lib/scan.js';
 import { getLagosWeek, tzDateKey } from '../lib/fixtures.js';
 import { DEFAULT_STAKE_BANDS } from '../lib/builder.js';
 import * as store from '../lib/store.js';
@@ -77,7 +77,9 @@ async function main() {
 
     const liveBoards = {};
     if (provider === 'oddsapi') {
+      const selectedDate = refDate || tzDateKey(new Date(), 'Africa/Lagos');
       for (const day of getLagosWeek(refDate || new Date()).days) {
+        if (day.date !== selectedDate) { liveBoards[day.date] = failedLiveBoard(day.date, { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits.' }); continue; }
         const live = await scanDayLive(day.date, { apiKey: process.env.ODDS_API_KEY, builder: { stakeBands } });
         liveBoards[day.date] = { scan: live.scan, builder: live.builder };
       }

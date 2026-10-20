@@ -238,6 +238,7 @@
           <label for="market-date-picker">Market Date</label>
           <input type="date" id="market-date-picker" class="input" />
         </div>
+        <label><input type="checkbox" id="scan-additional-markets" /> Fetch extra markets for up to 3 events (within the 30-credit limit)</label>
         <button class="btn btn-primary" id="btn-scan-live">⚡ Scan LIVE Odds</button>
         <button class="btn btn-ghost" id="btn-scan-sim">Scan Simulated</button>
       </div>
@@ -457,7 +458,7 @@
           <span class="panel-note">Check competitions to query</span>
         </div>
         <p class="panel-sub">
-          Bulk and event-specific market requests consume credits by market and region. Additional event requests are capped at 40 per day; recent responses are cached for 60 seconds. Uncheck sports you don't bet on to conserve monthly free quota (500 requests/month).
+          Bulk and event-specific market requests consume credits by market and region. Only UK-region quotes are fetched. Each scan has a conservative 30-credit request budget, including retries; coverage stops when that budget is reached. Extra event markets are off by default and limited to 3 events when enabled. Cached quotes expire after 60 seconds. Uncheck sports you don't bet on to conserve monthly free quota (500 requests/month).
         </p>
 
         <div class="trim-actions">
