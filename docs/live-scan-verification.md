@@ -29,3 +29,11 @@ No real provider scan was performed: this workspace's outbound network allowlist
 Browser-local storage now injects a same-origin live scanner into the shared API. All live entry points (market scan, weekly creation, selected-day rescan and full-week rescan) POST date, provider key, sports and builder settings to `/api/scan/live`. The server alone contacts the provider; localStorage still owns the portfolio. Keys are no longer included in dashboard scan URLs. Static-only deployments without an API return an explicit proxy-unavailable/invalid-response failure and do not fall back to direct provider access or simulation.
 
 Follow-up verification: `npm run build` and `npm test` pass (45 tests), including browser-bundle proxy transport, preservation of selected sports, all weekly scan paths, network failures and HTML-only static-host responses. Actual provider connectivity remains unverified in this workspace. Moving the requests server-side removes the browser-to-provider dependency but cannot guarantee that the deployed server's network or provider account is healthy.
+
+## Rate-limit classification follow-up
+
+HTTP 429 alone now means `RATE_LIMITED`, not exhausted credits. `OUT_OF_USAGE_CREDITS` or a 429 with an explicit zero remaining-credit header means `QUOTA_EXHAUSTED`. Requests are spaced by 150ms within a scan, with two event workers by default. Transient rate limits receive at most two retries per request and six retries per scan, exponential backoff, and respect for numeric/date `Retry-After`. Delays over five seconds are disclosed without retrying early. Retries also remain subject to the request timeout.
+
+Failed event enrichment records partial coverage and the provider error code, but rate limiting does not terminate all later enrichment or overwrite the builder refusal. Failed/successful sport and event coverage remains separately visible. Concurrent quota updates retain the lowest remaining and highest used counts seen during the scan.
+
+Verification: build passed; 48 tests passed, including a recovered 429 with 425 remaining, an exhausted retry budget on one event while another succeeds, long Retry-After handling, and explicit zero-credit exhaustion. No real provider requests were made from this workspace.
