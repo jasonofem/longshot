@@ -70,7 +70,7 @@
 <!-- Tabs Navigation -->
 <nav class="tabs" id="tabs">
   <button class="tab is-active" data-tab="week-board">Week Board</button>
-  <button class="tab" data-tab="today-ticket">Today's Ticket <span class="tab-dot" id="tab-today-dot" hidden></span></button>
+  <button class="tab" data-tab="today-ticket">Selected Ticket <span class="tab-dot" id="tab-today-dot" hidden></span></button>
   <button class="tab" data-tab="market">Market & Quota</button>
   <button class="tab" data-tab="history">History</button>
   <button class="tab" data-tab="settings">Settings</button>
@@ -139,7 +139,7 @@
           <!-- Day buttons Mon..Sun -->
         </div>
         <div class="slip-actions">
-          <button class="btn btn-ghost btn-sm" id="btn-rescan-single-ticket">↻ Rescan today</button>
+          <button class="btn btn-ghost btn-sm" id="btn-rescan-single-ticket">↻ Rescan selected day</button>
         </div>
       </div>
 
@@ -184,6 +184,7 @@
       </div>
     </div>
 
+    <details class="panel"><summary>Selected date, source and scan diagnostics</summary><pre id="slip-scan-report" style="white-space:pre-wrap"></pre></details>
     <!-- Legs Table -->
     <div class="panel legs-panel">
       <div class="panel-head">
@@ -270,6 +271,7 @@
       </div>
     </div>
 
+    <details class="panel"><summary>Market scan diagnostics</summary><pre id="market-scan-report" style="white-space:pre-wrap"></pre></details>
     <!-- Available Scanned Legs Pool -->
     <div class="panel">
       <div class="panel-head">
@@ -400,7 +402,7 @@
 
         <div class="form-group">
           <label for="input-min-legs">Min Accumulator Legs</label>
-          <input id="input-min-legs" class="input" type="number" min="8" max="25" value="10" />
+          <input id="input-min-legs" class="input" type="number" min="10" max="25" value="10" />
           <label for="input-max-leg-odds">Max Leg Odds</label>
           <input id="input-max-leg-odds" class="input" type="number" min="1.10" max="1.50" step="0.01" value="1.45" />
           <span class="field-hint">High-probability selections are not guaranteed. One losing leg loses the accumulator.</span>
@@ -455,7 +457,7 @@
           <span class="panel-note">Check competitions to query</span>
         </div>
         <p class="panel-sub">
-          Each checked competition costs 1 API request per live scan. Uncheck sports you don't bet on to conserve monthly free quota (500 requests/month).
+          Bulk and event-specific market requests consume credits by market and region. Additional event requests are capped at 40 per day; recent responses are cached for 60 seconds. Uncheck sports you don't bet on to conserve monthly free quota (500 requests/month).
         </p>
 
         <div class="trim-actions">

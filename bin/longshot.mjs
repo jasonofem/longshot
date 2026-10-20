@@ -12,6 +12,7 @@
 import { parseArgs } from 'node:util';
 import { createWeek, settleTicket, formatNaira, computeWeekStats } from '../lib/longshot.js';
 import { scanForDay, scanDayLive } from '../lib/scan.js';
+import { getLagosWeek, tzDateKey } from '../lib/fixtures.js';
 import { DEFAULT_STAKE_BANDS } from '../lib/builder.js';
 import * as store from '../lib/store.js';
 
@@ -74,7 +75,15 @@ async function main() {
     console.log(`  LONGSHOT — WEEKLY PORTFOLIO ENGINE (Africa/Lagos)`);
     console.log(`========================================================================`);
 
+    const liveBoards = {};
+    if (provider === 'oddsapi') {
+      for (const day of getLagosWeek(refDate || new Date()).days) {
+        const live = await scanDayLive(day.date, { apiKey: process.env.ODDS_API_KEY, builder: { stakeBands } });
+        liveBoards[day.date] = { scan: live.scan, builder: live.builder };
+      }
+    }
     const week = createWeek({
+      liveBoards,
       weekDate: refDate,
       goal,
       settings: {
@@ -183,8 +192,8 @@ async function main() {
       },
     });
 
-    const date = parsed.values.date || new Date().toISOString().slice(0, 10);
-    const result = scanForDay(date, { provider: parsed.values.provider });
+    const date = parsed.values.date || tzDateKey(new Date(), 'Africa/Lagos');
+    const result = parsed.values.provider === 'oddsapi' ? await scanDayLive(date, { apiKey: process.env.ODDS_API_KEY }) : scanForDay(date, { provider: parsed.values.provider });
     console.log(`\nScanned date: ${date}`);
     console.log(`Events: ${result.scan.events.length} | Legs: ${result.legs.length}`);
     if (result.builder.ok) {

@@ -19,6 +19,8 @@ const S = {
   liveBoards: {},
 };
 
+const lagosToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Lagos', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
 const LS_KEY = 'longshot.oddsApiKey';
 
 /* ───────────────────────── Transport & API ───────────────────────── */
@@ -166,6 +168,11 @@ async function autoCreateInitialWeek() {
 /* ───────────────────────── Render Everything ───────────────────────── */
 
 function renderAll() {
+  if (S.activeWeek) {
+    S.activeWeek.todayDate = lagosToday();
+    S.activeWeek.todayIndex = S.activeWeek.tickets.findIndex(t => t.date === lagosToday());
+    S.activeWeek.tickets.forEach(t => { t.isToday = t.date === lagosToday(); });
+  }
   renderTopbar();
   renderSimulatedBanner();
   renderWeekBoard();
@@ -324,10 +331,10 @@ function renderWeekBoard() {
           </div>
           <div style="padding: 24px 0; color: var(--dim); font-size: 13px;">
             <p><b>No Ticket Issued:</b> ${ticket.message}</p>
-            <p class="panel-note">The engine refused to roll a coin-flip. Refusing is a feature.</p>
+            <p class="panel-note">${ticket.reasonCode || "UNISSUED"}</p>
           </div>
         </div>
-        <div class="ticket-provider-line">${provBadge} <span>Synchronous fallback</span></div>
+        <div class="ticket-provider-line">${provBadge} <span>Scan result</span></div>
       `;
       grid.appendChild(card);
       continue;
@@ -429,6 +436,7 @@ function renderTodayTicket() {
   const tbody = $('#legs-table-body');
   const settlePanel = $('#slip-settlement-panel');
 
+  clearSlip();
   if (!week || !week.tickets.length) {
     title.textContent = 'No ticket available';
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:20px;">No tickets issued for this week.</td></tr>';
@@ -451,6 +459,8 @@ function renderTodayTicket() {
   const ticket = week.tickets[S.selectedDayIndex] || week.tickets[0];
   eyebrow.textContent = `TICKET ${ticket.dayIndex + 1} · ${ticket.dayName.toUpperCase()} (${ticket.date}) ${ticket.isToday ? '★ TODAY' : ''}`;
 
+  $('#slip-scan-report').textContent = `Selected: ${ticket.date} · Today (Lagos): ${lagosToday()} · Provider: ${ticket.provider?.used || 'unknown'} · Scanned: ${ticket.scanDiagnostics?.fetchedAt || 'not recorded'}
+${JSON.stringify({ scan: ticket.scanDiagnostics, builder: ticket.builderReport }, null, 2)}`;
   if (!ticket.issued || !ticket.slip) {
     title.textContent = 'No Ticket Issued for this day';
     provLine.textContent = `Refusal: ${ticket.message}`;
@@ -462,7 +472,7 @@ function renderTodayTicket() {
     bandBadge.textContent = 'UNISSUED';
     bandReason.textContent = ticket.message;
     legCountEl.textContent = '0';
-    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:30px; color:var(--dim);">Nothing in today’s market cleared the edge floor. Refusing is a feature.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:30px; color:var(--dim);">No ticket issued. See the exact refusal and scan report above.</td></tr>';
     settlePanel.hidden = true;
     return;
   }
@@ -480,7 +490,7 @@ function renderTodayTicket() {
   winProbEl.textContent = `${s.winProbPct}%`;
   oneInXEl.textContent = `1 in ${s.oneInX}`;
   stakeEl.textContent = formatNaira(s.stake);
-  confBandEl.textContent = `Band ${s.band} Confidence`;
+  confBandEl.textContent = `${s.avgLegProbPct}% avg modelled leg probability · Band ${s.band} data quality`;
 
   bandBadge.textContent = `BAND ${s.band}`;
   bandReason.textContent = s.bandReason;
@@ -499,7 +509,7 @@ function renderTodayTicket() {
     tr.innerHTML = `
       <td><b>${l.sport}</b><br><span style="font-size:11px; color:var(--dimmer);">${l.league}</span></td>
       <td><b>${l.home}</b> vs <b>${l.away}</b></td>
-      <td style="font-family:var(--mono); font-size:11px;">${l.kickoff ? new Date(l.kickoff).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+      <td style="font-family:var(--mono); font-size:11px;">${l.kickoff ? new Date(l.kickoff).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Lagos' }) : '—'}</td>
       <td>${l.market}</td>
       <td style="color:var(--text); font-weight:600;">${l.pick}</td>
       <td><span class="book-tag">${l.book}</span></td>
@@ -521,7 +531,7 @@ async function renderMarketTab() {
   const datePicker = $('#market-date-picker');
 
   if (!datePicker.value) {
-    datePicker.value = new Date().toISOString().slice(0, 10);
+    datePicker.value = lagosToday();
   }
 
   // Quota bar
@@ -775,7 +785,7 @@ function setupEventListeners() {
     const modal = $('#modal-setup');
     $('#modal-setup-error').hidden = true;
     const dateInput = $('#modal-week-date');
-    dateInput.value = new Date().toISOString().slice(0, 10);
+    dateInput.value = lagosToday();
     modal.hidden = false;
   });
 
@@ -807,22 +817,12 @@ function setupEventListeners() {
 
       const body = { weekDate, goal, provider, apiKey: key };
 
-      // In browser-local mode, if oddsapi is requested, fetch live board first
-      if (S.transport && provider === 'oddsapi' && key) {
-        try {
-          const liveRes = await api(`/api/scan/live?date=${weekDate}&apiKey=${encodeURIComponent(key)}`);
-          if (liveRes.builder) {
-            body.liveBoards = { [weekDate]: { scan: liveRes, builder: liveRes.builder } };
-          }
-        } catch {}
-      }
-
       const res = await api('/api/weeks', { method: 'POST', body });
       S.activeWeek = res.week;
       S.selectedDayIndex = res.week.todayIndex >= 0 ? res.week.todayIndex : 0;
       $('#modal-setup').hidden = true;
       renderAll();
-      toast('Weekly Portfolio Built', `${res.week.stats?.issuedCount || 7} tickets issued landing in 20.0–1000.0`, 'ok');
+      toast('Weekly Portfolio Built', `${res.week.stats?.issuedCount ?? 0} tickets issued landing in 20.0–1000.0`, 'ok');
     } catch (err) {
       errBox.hidden = false;
       errBox.textContent = `Build failed: ${err.message || err}`;
@@ -838,6 +838,7 @@ function setupEventListeners() {
     const btn = $('#btn-rescan-week');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
+    clearSlip();
     try {
       const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
       const res = await api(`/api/weeks/${S.activeWeek.id}/rescan`, {
@@ -848,6 +849,8 @@ function setupEventListeners() {
       renderAll();
       toast('Portfolio Rescanned', 'All 7 daily accumulators updated.', 'ok');
     } catch (err) {
+      clearSlip();
+      $('#slip-provider-line').textContent = `Rescan failed: ${err.message}`;
       toast('Rescan Failed', err.message, 'err');
     } finally {
       btn.disabled = false;
@@ -860,6 +863,7 @@ function setupEventListeners() {
     const btn = $('#btn-rescan-single-ticket');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
+    clearSlip();
     try {
       const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
       const res = await api(`/api/weeks/${S.activeWeek.id}/rescan`, {
@@ -870,10 +874,12 @@ function setupEventListeners() {
       renderAll();
       toast('Ticket Rescanned', `Day ${S.selectedDayIndex + 1} updated.`, 'ok');
     } catch (err) {
+      clearSlip();
+      $('#slip-provider-line').textContent = `Rescan failed: ${err.message}`;
       toast('Rescan Failed', err.message, 'err');
     } finally {
       btn.disabled = false;
-      btn.textContent = '↻ Rescan today';
+      btn.textContent = '↻ Rescan selected day';
     }
   });
 
@@ -942,7 +948,7 @@ function setupEventListeners() {
     btn.disabled = true;
     btn.textContent = 'Fetching Live Quotes…';
 
-    const date = $('#market-date-picker').value || new Date().toISOString().slice(0, 10);
+    const date = $('#market-date-picker').value || lagosToday();
     const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
 
     if (!key) {
@@ -956,6 +962,7 @@ function setupEventListeners() {
     try {
       const res = await api(`/api/scan/live?date=${date}&apiKey=${encodeURIComponent(key)}`);
       S.marketScan = res;
+      $('#market-scan-report').textContent = JSON.stringify({ date, diagnostics: res.diagnostics, builder: res.builder }, null, 2);
       if (res.quota) {
         S.quota = res.quota;
       }
@@ -963,6 +970,8 @@ function setupEventListeners() {
       renderTopbar();
       toast('Live Market Scanned', `${res.events?.length || 0} fixtures priced. Quota: ${res.quota?.remaining || '—'} left.`, 'ok');
     } catch (err) {
+      S.marketScan = null; renderMarketLegs();
+      $('#market-scan-report').textContent = err.message;
       toast('Live Scan Failed', err.message, 'err');
     } finally {
       btn.disabled = false;
@@ -971,10 +980,11 @@ function setupEventListeners() {
   });
 
   $('#btn-scan-sim').addEventListener('click', async () => {
-    const date = $('#market-date-picker').value || new Date().toISOString().slice(0, 10);
+    const date = $('#market-date-picker').value || lagosToday();
     try {
       const res = await api(`/api/scan?date=${date}&provider=sim`);
       S.marketScan = res;
+      $('#market-scan-report').textContent = JSON.stringify({ date, diagnostics: res.diagnostics, builder: res.builder }, null, 2);
       renderMarketTab();
       toast('Simulated Scan Complete', `${res.events?.length || 0} fixtures generated.`, 'ok');
     } catch (err) {
@@ -999,7 +1009,7 @@ function setupEventListeners() {
       S.settings.oddsApi.key = key;
       renderSettingsTab();
       renderSimulatedBanner();
-      toast('Settings Saved', key ? 'Odds API key stored and verified.' : 'Key cleared.', 'ok');
+      toast('Settings Saved', key ? 'Odds API key stored; run a scan to verify access.' : 'Key cleared.', 'ok');
     } catch (err) {
       toast('Failed to save settings', err.message, 'err');
     }
@@ -1007,9 +1017,9 @@ function setupEventListeners() {
 
   $('#btn-save-goals').addEventListener('click', async () => {
     const goal = Number($('#input-goal').value) || 2;
-    const minEdge = Number($('#input-min-edge').value) || 0.012;
+    const minEdge = Number($('#input-min-edge').value);
     const builder = { ...(S.settings.builder || {}),
-      minLegs: Math.min(25, Math.max(8, Number($('#input-min-legs').value) || 10)),
+      minLegs: Math.min(25, Math.max(10, Number($('#input-min-legs').value) || 10)),
       maxLegOdds: Math.min(1.50, Math.max(1.10, Number($('#input-max-leg-odds').value) || 1.45)) };
     try {
       await api('/api/settings', {
@@ -1097,3 +1107,16 @@ async function boot() {
 }
 
 window.addEventListener('DOMContentLoaded', boot);
+
+function clearSlip() {
+  $('#slip-day-title').textContent = 'No current slip';
+  $('#slip-provider-line').textContent = 'Awaiting scan result';
+  $('#slip-scan-report').textContent = '';
+  $('#slip-eyebrow').textContent = '';
+
+  for (const id of ['combined-odds', 'win-prob', 'one-in-x', 'stake', 'conf-band', 'band-badge', 'band-reason', 'fair-odds', 'total-edge', 'ev', 'corr', 'tier-label', 'leg-count']) {
+    const el = $(`#slip-${id}`); if (el) el.textContent = '—';
+  }
+  $('#legs-table-body').innerHTML = '';
+  $('#slip-settlement-panel').hidden = true;
+}
