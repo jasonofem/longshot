@@ -4129,7 +4129,7 @@ function toPlain(value) {
 /**
  * Await live scan whenever an API key exists (prepared-board pattern).
  */
-async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = null) {
+async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = null, liveScanner = scanDayLive) {
   if (liveBoards && Object.keys(liveBoards).length) return liveBoards;
   if (settings.provider !== 'oddsapi') return {};
 
@@ -4142,7 +4142,7 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
 
   for (const day of daysToFetch) {
     try {
-      const live = await scanDayLive(day.date, {
+      const live = await liveScanner(day.date, {
         tz: settings.tz,
         apiKey: key,
         sports,
@@ -4161,7 +4161,7 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
   return boards;
 }
 
-function createApi({ store, env = {}, persistent = true } = {}) {
+function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLive } = {}) {
   const startedAt = Date.now();
 
   async function statePayload() {
@@ -4272,11 +4272,11 @@ function createApi({ store, env = {}, persistent = true } = {}) {
       };
     }
 
-    if (method === 'GET' && p === '/api/scan/live') {
+    if (['GET', 'POST'].includes(method) && p === '/api/scan/live') {
       const settings = await store.getSettings();
       const tz = settings.tz || 'Africa/Lagos';
-      const date = q.get('date') || tzDateKey(new Date(), tz);
-      const apiKey = q.get('apiKey') || settings.oddsApi?.key || env.ODDS_API_KEY || '';
+      const date = body.date || q.get('date') || tzDateKey(new Date(), tz);
+      const apiKey = body.apiKey || q.get('apiKey') || settings.oddsApi?.key || env.ODDS_API_KEY || '';
 
       if (!apiKey) {
         return {
@@ -4289,14 +4289,15 @@ function createApi({ store, env = {}, persistent = true } = {}) {
       }
 
       try {
-        const live = await scanDayLive(date, {
+        const live = await liveScanner(date, {
           tz,
           apiKey,
-          sports: settings.oddsApi?.sports || [],
+          sports: Array.isArray(body.sports) ? body.sports : settings.oddsApi?.sports || [],
           builder: {
           ...(settings.builder || {}),
-            stakeBands: settings.stakeBands || DEFAULT_STAKE_BANDS,
-            minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
+            ...(body.builder || {}),
+            stakeBands: body.builder?.stakeBands || settings.stakeBands || DEFAULT_STAKE_BANDS,
+            minEdgePerLeg: Number(body.builder?.minEdgePerLeg ?? settings.minEdgePerLeg ?? 0.012),
           },
         });
 
@@ -4364,7 +4365,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
         body,
         mergedSettings,
         lagosWeek.days,
-        body.liveBoards
+        body.liveBoards, liveScanner
       );
 
       const week = createWeek({
@@ -4403,7 +4404,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
           const key = body.apiKey || settings.oddsApi?.key || env.ODDS_API_KEY || '';
           if (key) {
             try {
-              const live = await scanDayLive(ticket.date, {
+              const live = await liveScanner(ticket.date, {
                 tz,
                 apiKey: key,
                 sports: settings.oddsApi?.sports || [],
@@ -4418,7 +4419,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
       } else {
         // Rescan entire week
         const lagosWeek = getLagosWeek(week.mondayDate, tz);
-        const liveBoards = await livePreparedForWeek(env, body, settings, lagosWeek.days, body.liveBoards);
+        const liveBoards = await livePreparedForWeek(env, body, settings, lagosWeek.days, body.liveBoards, liveScanner);
         for (let i = 0; i < 7; i++) {
           const t = week.tickets[i];
           const prep = liveBoards[t.date] || null;
