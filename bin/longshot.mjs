@@ -25,7 +25,7 @@ Commands:
              --stake-max <n>   Max stake in Naira (default: 500)
              --goal <n>        Weekly win goal (default: 2 or 3)
              --date <YYYY-MM-DD> Reference date (default: today in Africa/Lagos)
-             --provider <sim|oddsapi> Data provider (default: sim)
+             --provider <sim|oddsapi|sportsgameodds> Data provider (default: sim)
 
   status   Print active week portfolio and running P&L
 
@@ -76,11 +76,11 @@ async function main() {
     console.log(`========================================================================`);
 
     const liveBoards = {};
-    if (provider === 'oddsapi') {
+    if (['oddsapi', 'sportsgameodds'].includes(provider)) {
       const selectedDate = refDate || tzDateKey(new Date(), 'Africa/Lagos');
       for (const day of getLagosWeek(refDate || new Date()).days) {
-        if (day.date !== selectedDate) { liveBoards[day.date] = failedLiveBoard(day.date, { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits.' }); continue; }
-        const live = await scanDayLive(day.date, { apiKey: process.env.ODDS_API_KEY, builder: { stakeBands } });
+        if (day.date !== selectedDate) { liveBoards[day.date] = failedLiveBoard(day.date, { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits.' }, provider); continue; }
+        const live = await scanDayLive(day.date, { provider, apiKey: provider === 'sportsgameodds' ? process.env.SPORTSGAMEODDS_API_KEY : process.env.ODDS_API_KEY, builder: { stakeBands } });
         liveBoards[day.date] = { scan: live.scan, builder: live.builder };
       }
     }
@@ -195,7 +195,7 @@ async function main() {
     });
 
     const date = parsed.values.date || tzDateKey(new Date(), 'Africa/Lagos');
-    const result = parsed.values.provider === 'oddsapi' ? await scanDayLive(date, { apiKey: process.env.ODDS_API_KEY }) : scanForDay(date, { provider: parsed.values.provider });
+    const result = ['oddsapi', 'sportsgameodds'].includes(parsed.values.provider) ? await scanDayLive(date, { provider: parsed.values.provider, apiKey: parsed.values.provider === 'sportsgameodds' ? process.env.SPORTSGAMEODDS_API_KEY : process.env.ODDS_API_KEY }) : scanForDay(date, { provider: parsed.values.provider });
     console.log(`\nScanned date: ${date}`);
     console.log(`Events: ${result.scan.events.length} | Legs: ${result.legs.length}`);
     if (result.builder.ok) {

@@ -1390,7 +1390,7 @@ __exp_14 = RATINGS;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   lib/fixtures.js   →  hoists buildDayEvents, tzDateKey, formatKickoff, getLagosWeek, tzNowParts, upcomingWeeks
+   lib/fixtures.js   →  hoists tzDateKey, buildDayEvents, formatKickoff, getLagosWeek, tzNowParts, upcomingWeeks
    ════════════════════════════════════════════════════════════════════════ */
 let __exp_15;
 let __exp_16;
@@ -1799,8 +1799,8 @@ function upcomingWeeks(n = 4, ref = new Date(), tz = 'Africa/Lagos') {
   }
   return weeks;
 }
-__exp_15 = buildDayEvents;
-__exp_16 = tzDateKey;
+__exp_15 = tzDateKey;
+__exp_16 = buildDayEvents;
 __exp_17 = formatKickoff;
 __exp_18 = getLagosWeek;
 __exp_19 = tzNowParts;
@@ -1900,7 +1900,7 @@ __exp_22 = applyMarketInformation;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   lib/markets.js   →  hoists correlationFactor, confBand, priceEvent, priceEventFromOffers, extractLegs, classifyBook, SIGNAL_WEIGHTS, confidence
+   lib/markets.js   →  hoists correlationFactor, confBand, priceEventFromOffers, extractLegs, classifyBook, priceEvent, SIGNAL_WEIGHTS, confidence
    ════════════════════════════════════════════════════════════════════════ */
 let __exp_23;
 let __exp_24;
@@ -2475,10 +2475,10 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
 }
 __exp_23 = correlationFactor;
 __exp_24 = confBand;
-__exp_25 = priceEvent;
-__exp_26 = priceEventFromOffers;
-__exp_27 = extractLegs;
-__exp_28 = classifyBook;
+__exp_25 = priceEventFromOffers;
+__exp_26 = extractLegs;
+__exp_27 = classifyBook;
+__exp_28 = priceEvent;
 __exp_29 = SIGNAL_WEIGHTS;
 __exp_30 = confidence;
 }
@@ -2870,7 +2870,7 @@ function buildComboPayload(legs, odds, winProb, corr, edgeSum, stakeBands) {
 function stripLeg(l) {
   return {
     legId: l.legId,
-    eventId: l.eventId,
+    eventId: l.eventId, provider: l.provider, providerOddID: l.providerOddID,
     sport: l.sport,
     league: l.league,
     kickoff: l.kickoff,
@@ -2919,23 +2919,191 @@ __exp_37 = evaluateTicketConfidence;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   lib/scan.js   →  hoists scanDay, scanForDay, scanDayLive, failedLiveBoard, PROVIDERS, SPORT_MAP, fetchOddsApi
+   lib/sportsgameodds.js   →  hoists scanSportsGameOdds
    ════════════════════════════════════════════════════════════════════════ */
 let __exp_38;
+{
+const tzDateKey = __exp_15;
+const priceEventFromOffers = __exp_25;
+const extractLegs = __exp_26;
+const classifyBook = __exp_27;
+const buildLongshotTicket = __exp_31;
+
+/** SportsGameOdds v2. Only actual, available bookmaker quotes are bettable.
+ * Docs: https://sportsgameodds.com/docs/data-types/odds
+ * Deliberately ignores provider consensus prices, props, alternate-line payloads
+ * and push-capable totals/spreads until their settlement model is implemented.
+ */
+
+
+
+const cache = new Map();
+const pending = new Map();
+const sports = { SOCCER: 'football', BASKETBALL: 'basketball', TENNIS: 'tennis', BASEBALL: 'baseball', HOCKEY: 'icehockey', ICE_HOCKEY: 'icehockey', MMA: 'mma', FOOTBALL: 'americanfootball' };
+function americanToDecimal(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && Math.abs(n) >= 100 ? (n > 0 ? 1 + n / 100 : 1 + 100 / -n) : null;
+}
+
+function convertSgoEvent(raw) {
+  const home = raw.teams?.home?.names?.long;
+  const away = raw.teams?.away?.names?.long;
+  if (!home || !away || !sports[raw.sportID] || raw.type !== 'match') return null;
+  const event = { id: raw.eventID, sport: sports[raw.sportID], home: { name: home }, away: { name: away },
+    kickoff: Date.parse(raw.status?.startsAt), league: { code: raw.leagueID, name: raw.leagueID, tier: 2 }, markets: [] };
+  const groups = new Map();
+  for (const [oddID, odd] of Object.entries(raw.odds || {})) {
+    const [stat, entity, period, bet, side] = oddID.split('-');
+    if (!['points', 'goals'].includes(stat) || period !== 'game' || odd.started || odd.ended) continue;
+    let type, expected, outcome, team = null;
+    if (bet === 'ml3way' && ['home', 'away', 'draw'].includes(side)) {
+      type = 'h2h'; expected = ['home', 'away', 'draw']; outcome = side;
+    } else if (bet === 'ml3way' && ['home+draw', 'away+draw', 'not_draw'].includes(side)) {
+      type = 'double_chance'; expected = ['home+draw', 'away+draw', 'not_draw']; outcome = side;
+    } else if (bet === 'ml' && raw.sportID !== 'SOCCER' && ['home', 'away'].includes(side)) {
+      type = 'h2h'; expected = ['home', 'away']; outcome = side;
+    } else if (bet === 'ou' && ['home', 'away', 'all'].includes(entity) && ['over', 'under'].includes(side)) {
+      type = entity === 'all' ? 'totals' : 'team_totals'; expected = ['over', 'under']; outcome = side;
+      team = entity === 'home' ? home : entity === 'away' ? away : null;
+    } else if (bet === 'sp' && ['home', 'away'].includes(side)) {
+      type = 'spreads'; expected = ['home', 'away']; outcome = side;
+    } else continue;
+    for (const [book, quote] of Object.entries(odd.byBookmaker || {})) {
+      if (quote.available !== true) continue;
+      const odds = americanToDecimal(quote.odds);
+      if (!odds) continue;
+      let line = null;
+      if (bet === 'ou' || bet === 'sp') {
+        const value = bet === 'ou' ? quote.overUnder : quote.spread;
+        if (value == null || value === '') continue;
+        line = Number(value);
+        // Half lines avoid pushes and quarter-line split settlements.
+        if (!Number.isFinite(line) || Math.abs(line % 1) !== 0.5) continue;
+        if (bet === 'sp' && side === 'away') line = -line;
+      }
+      const key = `${stat}|${bet}|${type}|${team || ''}|${line ?? ''}`;
+      if (!groups.has(key)) groups.set(key, { key, type, team, line, expected, books: new Map() });
+      const group = groups.get(key);
+      if (!group.books.has(book)) group.books.set(book, new Map());
+      group.books.get(book).set(outcome, { odds, oddID });
+    }
+  }
+  const offers = new Map();
+  const names = { home, away, draw: 'Draw', 'home+draw': `${home} or Draw`, 'away+draw': `${away} or Draw`, not_draw: `${home} or ${away}`, over: 'Over', under: 'Under' };
+  for (const group of groups.values()) {
+    const complete = [...group.books].filter(([, entries]) => group.expected.every(s => entries.has(s)));
+    if (!complete.length) continue;
+    event.markets.push({ key: group.key, type: group.type, name: `${group.team || ''} ${group.type} ${group.line ?? ''}`.trim(),
+      line: group.line, team: group.team, providerMarket: group.key, probabilitySource: 'sportsgameodds-bookmaker-devig-consensus-and-sharp',
+      outcomes: group.expected.map(side => ({ key: side, label: names[side], p: 1 / group.expected.length })) });
+    offers.set(group.key, complete.map(([book, quotes]) => ({ book: { name: book, cls: classifyBook(book) }, odds: group.expected.map(side => quotes.get(side).odds) })));
+  }
+  const priced = priceEventFromOffers(event, offers, { kickoffHours: Math.max(0, (event.kickoff - Date.now()) / 3600000) });
+  const legs = extractLegs({ ...event, markets: priced.markets }).map(l => ({ ...l, live: true, truthProb: null, provider: 'sportsgameodds', providerOddID: groups.get(l.marketKey)?.books.get(l.book)?.get(l.pickKey)?.oddID }));
+  return { event: { ...event, markets: priced.markets }, legs };
+}
+
+async function scanSportsGameOdds(dayKey, opts = {}) {
+  const diagnostics = { dayKey, tz: 'Africa/Lagos', provider: 'sportsgameodds', providerRequested: 'sportsgameodds', providerUsed: 'sportsgameodds',
+    fellBack: false, fetchedAt: new Date().toISOString(), rawFixtures: 0, fixturesOnDate: 0,
+    requestLimit: 2, eventObjectLimit: 50, requestsSent: 0, cachedPages: 0, partialCoverage: false, coverageWarnings: [],
+    usageNote: 'At most 2 pages of 25 events (50 objects). Free plan allowance is measured in returned objects, not scans. Cached pages do not make new provider requests.',
+    scope: 'Available full-game bookmaker moneyline, quoted double chance, half-line totals/team totals/spreads. Alternate-line payloads and push markets excluded.' };
+  const events = [], legs = [];
+  let failure = null, cursor = null;
+  const seen = new Set(), cursors = new Set();
+  if (!opts.apiKey) failure = { code: 'NO_KEY', message: 'Configure a SportsGameOdds key, not a The Odds API key.' };
+  else if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey) || !Number.isFinite(Date.parse(dayKey))) failure = { code: 'INVALID_DATE', message: 'Use a valid YYYY-MM-DD date.' };
+  else if (dayKey < tzDateKey(new Date(), 'Africa/Lagos')) failure = { code: 'PAST_DATE', message: 'Past-day scanning is disabled to conserve allowance.' };
+  const start = Date.parse(`${dayKey}T00:00:00+01:00`);
+  for (let page = 0; !failure && page < 2; page++) {
+    const url = new URL('https://api.sportsgameodds.com/v2/events/');
+    url.search = new URLSearchParams({ oddsAvailable: 'true', started: 'false', cancelled: 'false', type: 'match', limit: '25',
+      startsAfter: new Date(start - 1).toISOString(), startsBefore: new Date(start + 86400000).toISOString(), includeAltLines: 'false' });
+    if (Array.isArray(opts.leagues) && opts.leagues.length) url.searchParams.set('leagueID', opts.leagues.join(','));
+    if (cursor) url.searchParams.set('cursor', cursor);
+    const key = `${opts.apiKey}|${url.href}`;
+    try {
+      let data;
+      if (cache.get(key)?.until > Date.now()) { data = cache.get(key).data; diagnostics.cachedPages++; }
+      else {
+        if (!pending.has(key)) {
+          const task = (async () => {
+            const ctrl = new AbortController();
+            const abort = () => ctrl.abort();
+            opts.signal?.addEventListener('abort', abort, { once: true });
+            if (opts.signal?.aborted) abort();
+            const timer = setTimeout(abort, 15000);
+            try {
+              diagnostics.requestsSent++;
+              const res = await fetch(url.href, { headers: { 'x-api-key': opts.apiKey }, signal: ctrl.signal });
+              const json = await res.json().catch(() => null);
+              if (!res.ok || json?.success !== true || !Array.isArray(json.data)) {
+                const code = res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 403 ? 'SUBSCRIPTION_ACCESS_DENIED' : res.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR';
+                throw Object.assign(new Error(`SportsGameOdds ${code} (HTTP ${res.status}); check your account access/usage. No automatic retry was sent.`), { code });
+              }
+              if (cache.size >= 40) cache.clear();
+              cache.set(key, { data: json, until: Date.now() + 60000 });
+              return json;
+            } catch (err) {
+              if (ctrl.signal.aborted) throw Object.assign(new Error('SportsGameOdds request timed out or was cancelled.'), { code: 'PROVIDER_TIMEOUT' });
+              throw err;
+            } finally { clearTimeout(timer); opts.signal?.removeEventListener('abort', abort); }
+          })();
+          pending.set(key, task);
+        }
+        try { data = await pending.get(key); } finally { pending.delete(key); }
+      }
+      diagnostics.rawFixtures += data.data.length;
+      for (const raw of data.data) {
+        const kickoff = Date.parse(raw.status?.startsAt);
+        if (!Number.isFinite(kickoff) || kickoff < start || kickoff >= start + 86400000 || raw.status?.started || raw.status?.cancelled || raw.status?.ended || seen.has(raw.eventID)) continue;
+        seen.add(raw.eventID); diagnostics.fixturesOnDate++;
+        const converted = convertSgoEvent(raw);
+        if (!converted?.legs.length) continue;
+        events.push(converted.event); legs.push(...converted.legs);
+      }
+      cursor = data.nextCursor;
+      if (!cursor) break;
+      if (cursors.has(cursor)) { diagnostics.coverageWarnings.push({ code: 'REPEATED_CURSOR' }); break; }
+      cursors.add(cursor);
+    } catch (err) {
+      failure = { code: err.code || 'NETWORK_ERROR', message: err.code ? err.message : 'SportsGameOdds could not be reached. No simulated quotes were substituted.' };
+    }
+  }
+  if (cursor || failure) diagnostics.partialCoverage = true;
+  if (cursor) diagnostics.coverageWarnings.push({ code: 'PAGE_LIMIT_REACHED' });
+  if (failure) diagnostics.coverageWarnings.push({ code: failure.code });
+  Object.assign(diagnostics, { fixturesWithQuotes: events.length, extractedSelections: legs.length, availableMarketTypes: [...new Set(legs.map(l => l.marketType))] });
+  const builder = buildLongshotTicket(legs, opts.builder || {});
+  if (!failure && !legs.length) failure = { code: diagnostics.fixturesOnDate ? 'MARKETS_UNAVAILABLE' : 'NO_EVENTS_FOR_DATE', message: 'No complete supported bookmaker markets available for the selected Lagos date and account coverage.' };
+  if (failure) Object.assign(builder, { ok: false, best: null, reason: failure.code, message: failure.message });
+  builder.report.outcome = builder.reason || 'ISSUED'; diagnostics.reasonCode = builder.report.outcome; diagnostics.builder = builder.report;
+  const scan = { dayKey, events, legs, diagnostics };
+  return { scan, events, legs, diagnostics, builder, quota: { remaining: null, used: null, unit: 'See SportsGameOdds account dashboard' }, leagues: [] };
+}
+__exp_38 = scanSportsGameOdds;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   lib/scan.js   →  hoists scanDay, scanForDay, scanDayLive, failedLiveBoard, PROVIDERS, SPORT_MAP, fetchOddsApi
+   ════════════════════════════════════════════════════════════════════════ */
 let __exp_39;
 let __exp_40;
 let __exp_41;
 let __exp_42;
 let __exp_43;
 let __exp_44;
+let __exp_45;
 {
-const buildDayEvents = __exp_15;
-const tzDateKey = __exp_16;
+const scanSportsGameOdds = __exp_38;
+const buildDayEvents = __exp_16;
+const tzDateKey = __exp_15;
 const formatKickoff = __exp_17;
-const priceEvent = __exp_25;
-const priceEventFromOffers = __exp_26;
-const extractLegs = __exp_27;
-const classifyBook = __exp_28;
+const priceEvent = __exp_28;
+const priceEventFromOffers = __exp_25;
+const extractLegs = __exp_26;
+const classifyBook = __exp_27;
 const applyMarketInformation = __exp_22;
 const buildLongshotTicket = __exp_31;
 const DEFAULT_BUILDER_OPTS = __exp_32;
@@ -2964,7 +3132,9 @@ const mean = __exp_10;
 
 
 
+
 const PROVIDERS = {
+  sportsgameodds: { id: 'sportsgameodds', name: 'SportsGameOdds v2', needsKey: true, live: true, blurb: 'Bookmaker quotes; at most two event pages per selected-day scan.' },
   sim: {
     id: 'sim',
     name: 'Simulated market',
@@ -3050,9 +3220,9 @@ function scanDay(dayKey, opts = {}) {
     );
   }
 
-  if (requested === 'oddsapi') {
+  if (['oddsapi', 'sportsgameodds'].includes(requested)) {
     return failedLiveBoard(dayKey, { code: opts.apiKey ? 'ASYNC_REQUIRED' : 'NO_KEY',
-      message: 'Live scanning requires the asynchronous provider route and a valid API key.' }).scan;
+      message: 'Live scanning requires the asynchronous provider route and a valid API key.' }, requested).scan;
   }
 
   return stamp(scanSim(dayKey, opts), requested, 'sim', null);
@@ -3130,6 +3300,7 @@ function scanSim(dayKey, opts = {}) {
  * Async live scan: fetches real quotes from The Odds API v4, de-vigs, and builds ticket.
  */
 async function scanDayLive(dayKey, opts = {}) {
+  if (opts.provider === 'sportsgameodds') return scanSportsGameOdds(dayKey, opts);
   const apiKey = opts.apiKey;
   if (!apiKey) {
     const e = new Error('No Odds API key provided. Set ODDS_API_KEY in the environment or paste one in Settings.');
@@ -3194,8 +3365,8 @@ async function scanDayLive(dayKey, opts = {}) {
 const QUOTE_CACHE = new Map();
 const INFLIGHT = new Map();
 
-function failedLiveBoard(dayKey, err) {
-  const diagnostics = { dayKey, providerRequested: 'oddsapi', providerUsed: 'oddsapi',
+function failedLiveBoard(dayKey, err, provider = 'oddsapi') {
+  const diagnostics = { dayKey, providerRequested: provider, providerUsed: provider,
     fellBack: false, fetchedAt: new Date().toISOString(), ...(err.diagnostics || {}),
     reasonCode: err.code || 'LIVE_FETCH_FAILED', message: err.message };
   return { scan: { dayKey, events: [], legs: [], diagnostics }, builder: {
@@ -3649,19 +3820,18 @@ function scanForDay(dayKey, runConfig = {}, overrides = {}) {
     diagnostics: scan.diagnostics,
   };
 }
-__exp_38 = scanDay;
-__exp_39 = scanForDay;
-__exp_40 = scanDayLive;
-__exp_41 = failedLiveBoard;
-__exp_42 = PROVIDERS;
-__exp_43 = SPORT_MAP;
-__exp_44 = fetchOddsApi;
+__exp_39 = scanDay;
+__exp_40 = scanForDay;
+__exp_41 = scanDayLive;
+__exp_42 = failedLiveBoard;
+__exp_43 = PROVIDERS;
+__exp_44 = SPORT_MAP;
+__exp_45 = fetchOddsApi;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/longshot.js   →  hoists createWeek, settleTicket, rescanDayTicket, computeWeekStats, assessGoal, getWeeklyVerdict, formatNaira, WEEK_STATUS, TICKET_STATUS
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_45;
 let __exp_46;
 let __exp_47;
 let __exp_48;
@@ -3670,13 +3840,14 @@ let __exp_50;
 let __exp_51;
 let __exp_52;
 let __exp_53;
+let __exp_54;
 {
 const getLagosWeek = __exp_18;
-const tzDateKey = __exp_16;
-const scanDay = __exp_38;
-const scanForDay = __exp_39;
-const scanDayLive = __exp_40;
-const failedLiveBoard = __exp_41;
+const tzDateKey = __exp_15;
+const scanDay = __exp_39;
+const scanForDay = __exp_40;
+const scanDayLive = __exp_41;
+const failedLiveBoard = __exp_42;
 const buildLongshotTicket = __exp_31;
 const validateTicketOdds = __exp_33;
 const DEFAULT_BUILDER_OPTS = __exp_32;
@@ -3890,8 +4061,8 @@ function buildDayTicket(day, settings = {}, prepared = null) {
     minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
   };
 
-  if (!prepared && settings.provider === 'oddsapi') prepared = failedLiveBoard(day.date,
-    { code: settings.oddsApi?.key ? 'LIVE_NOT_FETCHED' : 'NO_KEY', message: 'Live quotes were not fetched. Configure a valid API key and rescan; no simulated ticket was substituted.' });
+  if (!prepared && ['oddsapi', 'sportsgameodds'].includes(settings.provider)) prepared = failedLiveBoard(day.date,
+    { code: settings.oddsApi?.key ? 'LIVE_NOT_FETCHED' : 'NO_KEY', message: 'Live quotes were not fetched. Configure a valid API key and rescan; no simulated ticket was substituted.' }, settings.provider);
   // Case 1: Prepared board from async live scan
   if (prepared?.builder && prepared?.scan) {
     const scan = prepared.scan;
@@ -4083,43 +4254,43 @@ function rescanDayTicket(week, dayIndex, settings = {}, prepared = null) {
   week.stats = computeWeekStats(week);
   return { week, ticket: newTicket };
 }
-__exp_45 = createWeek;
-__exp_46 = settleTicket;
-__exp_47 = rescanDayTicket;
-__exp_48 = computeWeekStats;
-__exp_49 = assessGoal;
-__exp_50 = getWeeklyVerdict;
-__exp_51 = formatNaira;
-__exp_52 = WEEK_STATUS;
-__exp_53 = TICKET_STATUS;
+__exp_46 = createWeek;
+__exp_47 = settleTicket;
+__exp_48 = rescanDayTicket;
+__exp_49 = computeWeekStats;
+__exp_50 = assessGoal;
+__exp_51 = getWeeklyVerdict;
+__exp_52 = formatNaira;
+__exp_53 = WEEK_STATUS;
+__exp_54 = TICKET_STATUS;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/http-core.js   →  hoists createApi, ENGINE_INFO, jsonSafe, toPlain
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_54;
 let __exp_55;
 let __exp_56;
 let __exp_57;
+let __exp_58;
 {
-const createWeek = __exp_45;
-const settleTicket = __exp_46;
-const rescanDayTicket = __exp_47;
-const computeWeekStats = __exp_48;
-const assessGoal = __exp_49;
-const getWeeklyVerdict = __exp_50;
-const formatNaira = __exp_51;
-const WEEK_STATUS = __exp_52;
-const TICKET_STATUS = __exp_53;
-const scanDay = __exp_38;
-const scanForDay = __exp_39;
-const scanDayLive = __exp_40;
-const failedLiveBoard = __exp_41;
-const PROVIDERS = __exp_42;
-const SPORT_MAP = __exp_43;
+const createWeek = __exp_46;
+const settleTicket = __exp_47;
+const rescanDayTicket = __exp_48;
+const computeWeekStats = __exp_49;
+const assessGoal = __exp_50;
+const getWeeklyVerdict = __exp_51;
+const formatNaira = __exp_52;
+const WEEK_STATUS = __exp_53;
+const TICKET_STATUS = __exp_54;
+const scanDay = __exp_39;
+const scanForDay = __exp_40;
+const scanDayLive = __exp_41;
+const failedLiveBoard = __exp_42;
+const PROVIDERS = __exp_43;
+const SPORT_MAP = __exp_44;
 const SIGNAL_WEIGHTS = __exp_29;
 const tzNowParts = __exp_19;
-const tzDateKey = __exp_16;
+const tzDateKey = __exp_15;
 const getLagosWeek = __exp_18;
 const upcomingWeeks = __exp_20;
 const DEFAULT_BUILDER_OPTS = __exp_32;
@@ -4172,11 +4343,16 @@ function toPlain(value) {
 /**
  * Await live scan whenever an API key exists (prepared-board pattern).
  */
+function liveProvider(p) { return ['oddsapi', 'sportsgameodds'].includes(p); }
+function liveKey(settings, env, provider = settings.provider) {
+  return provider === 'sportsgameodds' ? settings.sportsGameOdds?.key || env.SPORTSGAMEODDS_API_KEY || '' : settings.oddsApi?.key || env.ODDS_API_KEY || '';
+}
+
 async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = null, liveScanner = scanDayLive) {
   if (liveBoards && Object.keys(liveBoards).length) return liveBoards;
-  if (settings.provider !== 'oddsapi') return {};
+  if (!liveProvider(settings.provider)) return {};
 
-  const key = body?.apiKey || settings.oddsApi?.key || env?.ODDS_API_KEY || '';
+  const key = body?.apiKey || liveKey(settings, env);
   if (!key) return {};
 
   const boards = {};
@@ -4184,12 +4360,12 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
   const scanDate = body.scanDate || body.weekDate || tzDateKey(new Date(), 'Africa/Lagos');
   const daysToFetch = (weekDays || []).filter(day => day.date === scanDate);
   for (const day of weekDays || []) if (day.date !== scanDate) boards[day.date] = failedLiveBoard(day.date,
-    { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits. Select this day and explicitly rescan when needed.' });
+    { code: 'NOT_SCANNED', message: 'Not scanned to conserve API credits. Select this day and explicitly rescan when needed.' }, settings.provider);
 
   for (const day of daysToFetch) {
     try {
       const live = await liveScanner(day.date, {
-        tz: settings.tz,
+        tz: settings.tz, provider: settings.provider, leagues: settings.sportsGameOdds?.leagues || [],
         apiKey: key,
         sports,
         maxEventRequests: body.additionalMarkets === true ? 3 : 0,
@@ -4201,7 +4377,7 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
       });
       boards[day.date] = { scan: live.scan, builder: live.builder };
     } catch (err) {
-      boards[day.date] = failedLiveBoard(day.date, err);
+      boards[day.date] = failedLiveBoard(day.date, err, settings.provider);
     }
   }
 
@@ -4279,9 +4455,9 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
       const tz = settings.tz || 'Africa/Lagos';
       const date = q.get('date') || tzDateKey(new Date(), tz);
       const wantProvider = q.get('provider') || settings.provider || 'sim';
-      const apiKey = q.get('apiKey') || settings.oddsApi?.key || env.ODDS_API_KEY || '';
+      const apiKey = q.get('apiKey') || liveKey(settings, env);
 
-      if (wantProvider === 'oddsapi') return api({ method, pathname: '/api/scan/live', query: q });
+      if (liveProvider(wantProvider)) return api({ method, pathname: '/api/scan/live', query: q });
       const scanResult = scanForDay(
         date,
         {
@@ -4323,13 +4499,15 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
       const settings = await store.getSettings();
       const tz = settings.tz || 'Africa/Lagos';
       const date = body.date || q.get('date') || tzDateKey(new Date(), tz);
-      const apiKey = body.apiKey || q.get('apiKey') || settings.oddsApi?.key || env.ODDS_API_KEY || '';
+      const provider = body.provider || q.get('provider') || (liveProvider(settings.provider) ? settings.provider : 'oddsapi');
+      if (!liveProvider(provider)) return { status: 400, body: { error: 'Unknown live provider', code: 'INVALID_PROVIDER' } };
+      const apiKey = body.apiKey || q.get('apiKey') || liveKey(settings, env, provider);
 
       if (!apiKey) {
         return {
           status: 400,
           body: {
-            error: 'No Odds API key provided. Set ODDS_API_KEY in environment or paste one in Settings.',
+            error: 'No key configured for the selected provider. Save its key in Settings.',
             code: 'NO_KEY',
           },
         };
@@ -4337,7 +4515,7 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
 
       try {
         const live = await liveScanner(date, {
-          tz,
+          tz, provider, leagues: body.leagues || settings.sportsGameOdds?.leagues || [],
           apiKey,
           maxEventRequests: body.additionalMarkets === true ? 3 : 0,
           sports: Array.isArray(body.sports) ? body.sports : settings.oddsApi?.sports || [],
@@ -4354,8 +4532,8 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
           body: {
             date,
             provider: {
-              requested: 'oddsapi',
-              used: 'oddsapi',
+              requested: provider,
+              used: provider,
               fellBack: false,
               reason: null,
             },
@@ -4398,12 +4576,12 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
       // Save any updated settings from creation body
       if (body.apiKey) {
         await store.saveSettings({
-          oddsApi: { ...(settings.oddsApi || {}), key: body.apiKey },
-          provider: 'oddsapi',
+          [body.provider === 'sportsgameodds' || (!body.provider && settings.provider === 'sportsgameodds') ? 'sportsGameOdds' : 'oddsApi']: { ...(body.provider === 'sportsgameodds' || (!body.provider && settings.provider === 'sportsgameodds') ? settings.sportsGameOdds : settings.oddsApi), key: body.apiKey },
+          provider: body.provider === 'sportsgameodds' || (!body.provider && settings.provider === 'sportsgameodds') ? 'sportsgameodds' : 'oddsapi',
         });
       }
 
-      if (body.provider && ['sim', 'oddsapi', 'manual'].includes(body.provider)) await store.saveSettings({ provider: body.provider });
+      if (body.provider && ['sim', 'oddsapi', 'sportsgameodds', 'manual'].includes(body.provider)) await store.saveSettings({ provider: body.provider });
       const mergedSettings = await store.getSettings();
       const lagosWeek = getLagosWeek(weekDate, tz);
 
@@ -4448,25 +4626,25 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
         if (!ticket) return { status: 400, body: { error: `Invalid dayIndex ${dayIndex}` } };
 
         let prepared = body.prepared || null;
-        if (!prepared && settings.provider === 'oddsapi') {
-          const key = body.apiKey || settings.oddsApi?.key || env.ODDS_API_KEY || '';
+        if (!prepared && liveProvider(settings.provider)) {
+          const key = body.apiKey || liveKey(settings, env);
           if (key) {
             try {
               const live = await liveScanner(ticket.date, {
-                tz,
+                tz, provider: settings.provider, leagues: settings.sportsGameOdds?.leagues || [],
                 apiKey: key,
                 sports: settings.oddsApi?.sports || [],
                 maxEventRequests: body.additionalMarkets === true ? 3 : 0,
                 builder: { ...(settings.builder || {}), stakeBands: settings.stakeBands, minEdgePerLeg: settings.minEdgePerLeg },
               });
               prepared = { scan: live.scan, builder: live.builder };
-            } catch (err) { prepared = failedLiveBoard(ticket.date, err); }
+            } catch (err) { prepared = failedLiveBoard(ticket.date, err, settings.provider); }
           }
         }
 
         rescanDayTicket(week, dayIndex, settings, prepared);
       } else {
-        if (settings.provider === 'oddsapi') return { status: 400, body: { code: 'SELECT_DAY_REQUIRED', error: 'Full-week live scanning is disabled to protect credits. Select one day to rescan.' } };
+        if (liveProvider(settings.provider)) return { status: 400, body: { code: 'SELECT_DAY_REQUIRED', error: 'Full-week live scanning is disabled to protect credits. Select one day to rescan.' } };
         // Rescan entire week
         const lagosWeek = getLagosWeek(week.mondayDate, tz);
         const liveBoards = await livePreparedForWeek(env, body, settings, lagosWeek.days, body.liveBoards, liveScanner);
@@ -4516,18 +4694,18 @@ function createApi({ store, env = {}, persistent = true, liveScanner = scanDayLi
     return { status: 404, body: { error: `Route not found: ${method} ${pathname}` } };
   };
 }
-__exp_54 = createApi;
-__exp_55 = ENGINE_INFO;
-__exp_56 = jsonSafe;
-__exp_57 = toPlain;
+__exp_55 = createApi;
+__exp_56 = ENGINE_INFO;
+__exp_57 = jsonSafe;
+__exp_58 = toPlain;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/store-shared.js   →  hoists DEFAULT_SETTINGS, summariseWeek, reviveWeek
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_58;
 let __exp_59;
 let __exp_60;
+let __exp_61;
 {
 /**
  * store-shared.js — shared persistence definitions across server, memory, and browser stores.
@@ -4556,6 +4734,7 @@ const DEFAULT_SETTINGS = {
     key: '',
     sports: [], // subset of sport keys to trim the board; empty = all 23
   },
+  sportsGameOdds: { key: '', leagues: [] },
   manualOdds: [],
 };
 
@@ -4585,21 +4764,21 @@ function reviveWeek(week) {
   if (!week) return week;
   return week;
 }
-__exp_58 = DEFAULT_SETTINGS;
-__exp_59 = summariseWeek;
-__exp_60 = reviveWeek;
+__exp_59 = DEFAULT_SETTINGS;
+__exp_60 = summariseWeek;
+__exp_61 = reviveWeek;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/memory-store.js   →  hoists createLocalStorageStore, createStoreAdapter, createMemoryStore
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_61;
 let __exp_62;
 let __exp_63;
+let __exp_64;
 {
-const DEFAULT_SETTINGS = __exp_58;
-const summariseWeek = __exp_59;
-const reviveWeek = __exp_60;
+const DEFAULT_SETTINGS = __exp_59;
+const summariseWeek = __exp_60;
+const reviveWeek = __exp_61;
 
 /**
  * memory-store.js — storage adapter for in-memory (Vercel serverless) and localStorage (browser).
@@ -4770,12 +4949,12 @@ function createLocalStorageStore(key = 'longshot.store.v1', opts = {}) {
   store.evictions = evictions;
   return store;
 }
-__exp_61 = createLocalStorageStore;
-__exp_62 = createStoreAdapter;
-__exp_63 = createMemoryStore;
+__exp_62 = createLocalStorageStore;
+__exp_63 = createStoreAdapter;
+__exp_64 = createMemoryStore;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    facade — 49 public bindings
    ════════════════════════════════════════════════════════════════════════ */
-export { __exp_7 as round, __exp_6 as clamp, __exp_10 as mean, __exp_11 as stdev, __exp_12 as ev, __exp_9 as devig, __exp_18 as getLagosWeek, __exp_20 as upcomingWeeks, __exp_16 as tzDateKey, __exp_19 as tzNowParts, __exp_17 as formatKickoff, __exp_28 as classifyBook, __exp_27 as extractLegs, __exp_23 as correlationFactor, __exp_30 as confidence, __exp_24 as confBand, __exp_29 as SIGNAL_WEIGHTS, __exp_31 as buildLongshotTicket, __exp_33 as validateTicketOdds, __exp_37 as evaluateTicketConfidence, __exp_32 as DEFAULT_BUILDER_OPTS, __exp_34 as DEFAULT_STAKE_BANDS, __exp_35 as MIN_TICKET_ODDS, __exp_36 as MAX_TICKET_ODDS, __exp_38 as scanDay, __exp_39 as scanForDay, __exp_40 as scanDayLive, __exp_44 as fetchOddsApi, __exp_42 as PROVIDERS, __exp_43 as SPORT_MAP, __exp_45 as createWeek, __exp_46 as settleTicket, __exp_47 as rescanDayTicket, __exp_48 as computeWeekStats, __exp_49 as assessGoal, __exp_50 as getWeeklyVerdict, __exp_51 as formatNaira, __exp_52 as WEEK_STATUS, __exp_53 as TICKET_STATUS, __exp_54 as createApi, __exp_55 as ENGINE_INFO, __exp_56 as jsonSafe, __exp_57 as toPlain, __exp_58 as DEFAULT_SETTINGS, __exp_59 as summariseWeek, __exp_60 as reviveWeek, __exp_61 as createLocalStorageStore, __exp_62 as createStoreAdapter, __exp_63 as createMemoryStore };
+export { __exp_7 as round, __exp_6 as clamp, __exp_10 as mean, __exp_11 as stdev, __exp_12 as ev, __exp_9 as devig, __exp_18 as getLagosWeek, __exp_20 as upcomingWeeks, __exp_15 as tzDateKey, __exp_19 as tzNowParts, __exp_17 as formatKickoff, __exp_27 as classifyBook, __exp_26 as extractLegs, __exp_23 as correlationFactor, __exp_30 as confidence, __exp_24 as confBand, __exp_29 as SIGNAL_WEIGHTS, __exp_31 as buildLongshotTicket, __exp_33 as validateTicketOdds, __exp_37 as evaluateTicketConfidence, __exp_32 as DEFAULT_BUILDER_OPTS, __exp_34 as DEFAULT_STAKE_BANDS, __exp_35 as MIN_TICKET_ODDS, __exp_36 as MAX_TICKET_ODDS, __exp_39 as scanDay, __exp_40 as scanForDay, __exp_41 as scanDayLive, __exp_45 as fetchOddsApi, __exp_43 as PROVIDERS, __exp_44 as SPORT_MAP, __exp_46 as createWeek, __exp_47 as settleTicket, __exp_48 as rescanDayTicket, __exp_49 as computeWeekStats, __exp_50 as assessGoal, __exp_51 as getWeeklyVerdict, __exp_52 as formatNaira, __exp_53 as WEEK_STATUS, __exp_54 as TICKET_STATUS, __exp_55 as createApi, __exp_56 as ENGINE_INFO, __exp_57 as jsonSafe, __exp_58 as toPlain, __exp_59 as DEFAULT_SETTINGS, __exp_60 as summariseWeek, __exp_61 as reviveWeek, __exp_62 as createLocalStorageStore, __exp_63 as createStoreAdapter, __exp_64 as createMemoryStore };

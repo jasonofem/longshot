@@ -247,7 +247,7 @@
       <div class="quota-hero-box" id="quota-hero-box">
         <div class="quota-head">
           <div>
-            <h3>The Odds API Quota Status</h3>
+            <h3>Provider Usage Status</h3>
             <span class="panel-note">Header capture from api.the-odds-api.com v4</span>
           </div>
           <div class="quota-nums" id="quota-nums">Remaining: — / Used: —</div>
@@ -353,21 +353,26 @@
       <!-- Odds API Key Box -->
       <div class="panel settings-panel">
         <div class="panel-head">
-          <h2>The Odds API Key</h2>
+          <h2>Live Provider &amp; API Key</h2>
           <span class="panel-note">api.the-odds-api.com v4</span>
         </div>
         <p class="panel-sub">
-          Paste your key below. It is saved in your browser's localStorage and only transmitted to same-origin scan routes. The server environment variable <code>ODDS_API_KEY</code> is also honoured when present.
+          Paste your key below. It is saved in your browser's localStorage and only transmitted to same-origin scan routes. Server variables <code>ODDS_API_KEY</code> and <code>SPORTSGAMEODDS_API_KEY</code> are supported by their respective providers.
         </p>
 
         <div class="form-group">
-          <label for="input-api-key">API Key</label>
-          <textarea id="input-api-key" class="textarea key-textarea" rows="2" placeholder="Paste your 32-character Odds API key here…"></textarea>
+          <label for="input-live-provider">Live provider (keys are stored separately)</label>
+          <select id="input-live-provider" class="select"><option value="oddsapi">The Odds API</option><option value="sportsgameodds">SportsGameOdds v2</option></select>
+          <label for="input-sgo-leagues">SportsGameOdds league IDs (optional, comma-separated)</label>
+          <input id="input-sgo-leagues" class="input" placeholder="Leave blank for account-covered leagues" />
+          <p class="field-hint">SportsGameOdds: at most 2 pages × 25 events (up to 50 objects) per scan; no automatic retries. The documented free allowance is 2,500 returned objects/month, with limited leagues/books—not 2,500 scans. Only supported full-game bookmaker markets are priced.</p>
+          <label for="input-api-key">Key for selected provider</label>
+          <textarea id="input-api-key" class="textarea key-textarea" rows="2" placeholder="Paste the key for the selected provider…"></textarea>
         </div>
 
         <div class="form-actions">
           <button class="btn btn-primary" id="btn-save-api-key">Save Key</button>
-          <span class="key-status-text" id="key-status-text">No key configured (using SIMULATED fallback)</span>
+          <span class="key-status-text" id="key-status-text">No key configured for selected provider</span>
         </div>
       </div>
 
@@ -504,6 +509,7 @@
       <div class="form-group">
         <label for="modal-provider-select">Pricing Provider</label>
         <select id="modal-provider-select" class="select">
+          <option value="sportsgameodds">SportsGameOdds v2 (Live Quotes)</option>
           <option value="oddsapi">The Odds API v4 (Live Quotes)</option>
           <option value="sim">Simulated Market (Multi-book vig model)</option>
         </select>
