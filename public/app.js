@@ -22,6 +22,13 @@ const S = {
 const lagosToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Lagos', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 const LS_KEY = 'longshot.oddsApiKey';
+const providerName = p => p === 'sportsgameodds' ? 'SportsGameOdds v2' : 'The Odds API v4';
+const keyField = p => p === 'sportsgameodds' ? 'sportsGameOdds' : 'oddsApi';
+const keyStorage = p => p === 'sportsgameodds' ? 'longshot.sportsGameOddsKey' : LS_KEY;
+const providerKey = (p = S.settings?.provider) => S.settings?.[keyField(p)]?.key || localStorage.getItem(keyStorage(p)) || '';
+const liveProvider = p => ['oddsapi', 'sportsgameodds'].includes(p);
+const scanCost = (p = S.settings?.provider) => p === 'sportsgameodds' ? 'SportsGameOdds: up to 2 event-page requests (25 events per page; at most 50 returned event objects), no automatic retries. Free allowance is 2,500 objects/month, not 2,500 scans; confirm current limits in your account.' : 'The Odds API: up to 30 credits, UK region only.';
+
 
 /* ───────────────────────── Transport & API ───────────────────────── */
 
@@ -464,7 +471,7 @@ ${JSON.stringify({ scan: ticket.scanDiagnostics, builder: ticket.builderReport }
   const isSim = ticket.provider?.used === 'sim' || ticket.provider?.fellBack;
   provLine.innerHTML = isSim
     ? `<span class="prov-badge prov-sim">SIMULATED</span> ${ticket.provider?.reason || 'Simulated market models'}`
-    : `<span class="prov-badge prov-live">LIVE</span> The Odds API v4 · Real line-shopping`;
+    : `<span class="prov-badge prov-live">LIVE</span> ${providerName(ticket.provider?.used)} · Real bookmaker quotes`;
 
   oddsEl.textContent = s.odds.toFixed(2);
   winProbEl.textContent = `${s.winProbPct}%`;
@@ -523,12 +530,13 @@ async function renderMarketTab() {
     quotaNums.textContent = `Remaining: ${rem} / Used: ${used} (${pctRemain}% allowance)`;
     quotaFill.style.width = `${pctRemain}%`;
   } else {
-    quotaNums.textContent = 'Quota status pending live scan…';
+    quotaNums.textContent = S.settings?.provider === 'sportsgameodds' ? 'Check SportsGameOdds account for remaining allowance; at most 2 pages per scan.' : 'Quota status pending live scan…';
     quotaFill.style.width = '100%';
   }
 
-  // Render 23 leagues from sportMap
-  const sports = S.state?.sportMap || [];
+  // The Odds API trim keys do not identify SportsGameOdds leagues.
+  const sports = S.settings?.provider === 'sportsgameodds' ? [] : S.state?.sportMap || [];
+  $('#scan-additional-markets').disabled = S.settings?.provider === 'sportsgameodds';
   chipsGrid.innerHTML = '';
   sports.forEach((s) => {
     const chip = document.createElement('div');
@@ -553,6 +561,8 @@ async function renderMarketTab() {
     `;
     chipsGrid.appendChild(chip);
   });
+
+  if (S.settings?.provider === 'sportsgameodds') chipsGrid.textContent = `SportsGameOdds uses account-covered leagues and native league IDs, not The Odds API's trim list. Filter IDs in Settings. See scan diagnostics for actual coverage.`;
 
   // Render market legs table
   renderMarketLegs();
@@ -648,14 +658,18 @@ function renderSettingsTab() {
   const trimGrid = $('#trim-checkbox-grid');
 
   const s = S.settings || {};
-  const currentKey = s.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
+  const currentKey = providerKey();
+  $('#input-live-provider').value = s.provider === 'sportsgameodds' ? 'sportsgameodds' : 'oddsapi';
+  $('#input-sgo-leagues').value = (s.sportsGameOdds?.leagues || []).join(',');
+  $('#input-sgo-leagues').disabled = s.provider !== 'sportsgameodds';
+  trimGrid.closest('.settings-panel').hidden = s.provider === 'sportsgameodds';
 
   keyInput.value = currentKey;
   if (currentKey) {
     keyStatus.textContent = `✓ Key active (${currentKey.slice(0, 4)}…${currentKey.slice(-4)})`;
     keyStatus.style.color = 'var(--green)';
   } else {
-    keyStatus.textContent = 'No key configured (using SIMULATED fallback)';
+    keyStatus.textContent = 'No key configured for this provider. Live scans will be refused.';
     keyStatus.style.color = 'var(--gold)';
   }
 
@@ -750,6 +764,12 @@ function toast(title, msg = '', type = 'ok', duration = 5000) {
 /* ───────────────────────── Event Listeners ───────────────────────── */
 
 function setupEventListeners() {
+  $('#input-live-provider').addEventListener('change', () => {
+    const provider = $('#input-live-provider').value;
+    $('#input-api-key').value = providerKey(provider);
+    $('#input-sgo-leagues').disabled = provider !== 'sportsgameodds';
+    $('#key-status-text').textContent = 'Click Save Key to activate this provider.';
+  });
   // Tabs
   $('#tabs').addEventListener('click', (e) => {
     const tab = e.target.closest('.tab');
@@ -766,6 +786,7 @@ function setupEventListeners() {
     $('#modal-setup-error').hidden = true;
     const dateInput = $('#modal-week-date');
     dateInput.value = lagosToday();
+    $('#modal-provider-select').value = liveProvider(S.settings?.provider) ? S.settings.provider : 'sim';
     modal.hidden = false;
   });
 
@@ -793,9 +814,9 @@ function setupEventListeners() {
       const weekDate = $('#modal-week-date').value;
       const provider = $('#modal-provider-select').value;
       const goal = Number($('#modal-goal-select').value) || 2;
-      const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
+      const key = providerKey(provider);
 
-      if (provider === 'oddsapi' && !confirm('Fetch quotes for the selected date only? Up to 30 credits may be spent even if no ticket qualifies. Other days will remain unscanned.')) return;
+      if (liveProvider(provider) && !confirm(`${scanCost(provider)} Fetch the selected date only? No ticket is guaranteed; other days remain unscanned.`)) return;
       const body = { weekDate, goal, provider, apiKey: key, scanDate: weekDate };
 
       const res = await api('/api/weeks', { method: 'POST', body });
@@ -816,13 +837,13 @@ function setupEventListeners() {
 
   // Rescan Week Action
   $('#btn-rescan-week').addEventListener('click', async () => {
-    if (S.settings?.provider === 'oddsapi') { toast('Select one day', 'Full-week live rescanning is disabled to protect API credits.', 'warn'); return; }
+    if (liveProvider(S.settings?.provider)) { toast('Select one day', 'Full-week live rescanning is disabled to protect API credits.', 'warn'); return; }
     const btn = $('#btn-rescan-week');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
     clearSlip();
     try {
-      const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
+      const key = providerKey();
       const res = await api(`/api/weeks/${S.activeWeek.id}/rescan`, {
         method: 'POST',
         body: { apiKey: key },
@@ -842,13 +863,13 @@ function setupEventListeners() {
 
   // Rescan Single Ticket
   $('#btn-rescan-single-ticket').addEventListener('click', async () => {
-    if (S.settings?.provider === 'oddsapi' && !confirm('Scan selected day? Up to 30 credits; no ticket is guaranteed. Extra event markets are disabled for this scan.')) return;
+    if (liveProvider(S.settings?.provider) && !confirm(`${scanCost()} Scan selected day? No ticket is guaranteed.`)) return;
     const btn = $('#btn-rescan-single-ticket');
     btn.disabled = true;
     btn.textContent = 'Rescanning…';
     clearSlip();
     try {
-      const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
+      const key = providerKey();
       const res = await api(`/api/weeks/${S.activeWeek.id}/rescan`, {
         method: 'POST',
         body: { dayIndex: S.selectedDayIndex, apiKey: key },
@@ -926,14 +947,14 @@ function setupEventListeners() {
 
   // Live scan in Market Tab
   $('#btn-scan-live').addEventListener('click', async () => {
-    if (!confirm('Scan this date? Up to 30 credits may be spent even without an issued ticket. Only UK-region quotes are fetched.')) return;
+    if (!confirm(`${scanCost()} Scan this date? No ticket is guaranteed.`)) return;
     const btn = $('#btn-scan-live');
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Fetching Live Quotes…';
 
     const date = $('#market-date-picker').value || lagosToday();
-    const key = S.settings?.oddsApi?.key || localStorage.getItem(LS_KEY) || '';
+    const key = providerKey();
 
     if (!key) {
       toast('API Key Required', 'Paste your Odds API key in Settings before running a live scan.', 'warn');
@@ -944,7 +965,7 @@ function setupEventListeners() {
     }
 
     try {
-      const res = await api('/api/scan/live', { method: 'POST', body: { date, apiKey: key, additionalMarkets: $('#scan-additional-markets').checked } });
+      const res = await api('/api/scan/live', { method: 'POST', body: { date, provider: liveProvider(S.settings?.provider) ? S.settings.provider : 'oddsapi', apiKey: key, additionalMarkets: $('#scan-additional-markets').checked } });
       S.marketScan = res;
       $('#market-scan-report').textContent = JSON.stringify({ date, diagnostics: res.diagnostics, builder: res.builder }, null, 2);
       if (res.quota) {
@@ -983,14 +1004,19 @@ function setupEventListeners() {
   // Settings Tab Saves
   $('#btn-save-api-key').addEventListener('click', async () => {
     const key = $('#input-api-key').value.trim();
-    localStorage.setItem(LS_KEY, key);
+    const provider = $('#input-live-provider').value;
+    const field = keyField(provider);
+    const leagues = $('#input-sgo-leagues').value.split(',').map(x => x.trim()).filter(Boolean);
+    localStorage.setItem(keyStorage(provider), key);
     try {
       await api('/api/settings', {
         method: 'POST',
-        body: { oddsApi: { key }, provider: key ? 'oddsapi' : 'sim' },
+        body: { [field]: { ...(S.settings[field] || {}), key, ...(provider === 'sportsgameodds' ? { leagues } : {}) }, provider },
       });
-      S.settings.oddsApi = S.settings.oddsApi || {};
-      S.settings.oddsApi.key = key;
+      S.settings[field] = { ...(S.settings[field] || {}), key, leagues };
+      S.settings.provider = provider;
+      S.quota = { remaining: null, used: null };
+      S.marketScan = null;
       renderSettingsTab();
       renderSimulatedBanner();
       toast('Settings Saved', key ? 'Odds API key stored; run a scan to verify access.' : 'Key cleared.', 'ok');

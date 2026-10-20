@@ -84,7 +84,7 @@ export async function proxyLiveScan(date, options = {}) {
     res = await globalThis.fetch('/api/scan/live', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ date, apiKey: options.apiKey, sports: options.sports, builder: options.builder, additionalMarkets: options.maxEventRequests > 0 }),
+      body: JSON.stringify({ date, provider: options.provider, leagues: options.leagues, apiKey: options.apiKey, sports: options.sports, builder: options.builder, additionalMarkets: options.maxEventRequests > 0 }),
       signal: options.signal,
     });
   } catch {
