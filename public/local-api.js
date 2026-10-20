@@ -52,7 +52,7 @@ export async function localFetch(path, opts = {}) {
     });
     return respond(out.status, out.body);
   } catch (err) {
-    return respond(500, { error: err.message || 'local engine error' });
+    return respond(500, { error: err.message || 'local engine error', code: err.code || 'LOCAL_API_ERROR', diagnostics: err.diagnostics });
   }
 }
 

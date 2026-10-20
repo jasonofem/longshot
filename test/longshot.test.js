@@ -427,12 +427,13 @@ describe('Expected wins maths & goal structural assessment', () => {
  * 8. Fallback-Honesty Contract (Dead key produces loud SIMULATED banner)
  * ────────────────────────────────────────────────────────────────── */
 describe('Fallback honesty contract — dead key or missing key', () => {
-  it('sync scan Day with provider=oddsapi but no key admits fallback to sim', () => {
+  it('sync live scan refuses without simulation', () => {
     const scan = scanDay('2026-10-15', { provider: 'oddsapi', apiKey: '' });
     assert.equal(scan.diagnostics.providerRequested, 'oddsapi');
-    assert.equal(scan.diagnostics.providerUsed, 'sim');
-    assert.equal(scan.diagnostics.fellBack, true);
-    assert.ok(scan.diagnostics.fallbackReason.includes('simulated'));
+    assert.equal(scan.diagnostics.providerUsed, 'oddsapi');
+    assert.equal(scan.diagnostics.fellBack, false);
+    assert.equal(scan.legs.length, 0);
+    assert.equal(scan.diagnostics.reasonCode, 'NO_KEY');
   });
 
   it('async scanDayLive throws cleanly on missing key rather than silently simulating', async () => {
@@ -452,15 +453,9 @@ describe('Fallback honesty contract — dead key or missing key', () => {
     globalThis.fetch = async () => new Response(JSON.stringify([]), { status: 200 });
 
     try {
-      await assert.rejects(
-        async () => {
-          await scanDayLive('2026-10-15', { apiKey: 'dead-key-12345', sports: ['soccer_epl'] });
-        },
-        (err) => {
-          assert.equal(err.code, 'NO_GAMES');
-          return true;
-        }
-      );
+      const result = await scanDayLive('2099-10-15', { apiKey: 'empty-test', sports: ['soccer_epl'] });
+      assert.equal(result.builder.reason, 'NO_EVENTS_FOR_DATE');
+      assert.equal(result.events.length, 0);
     } finally {
       globalThis.fetch = origFetch;
     }

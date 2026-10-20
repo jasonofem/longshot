@@ -2156,7 +2156,9 @@ function priceEvent(event, truth, opts = {}) {
       key: m.key,
       name: m.name,
       type: m.type,
-      line: m.line ?? null,
+      probabilitySource: m.probabilitySource,
+      providerMarket: m.providerMarket,
+      line: m.line ?? m.point ?? null,
       team: m.team ?? null,
       // Double chance outcomes deliberately overlap, so the vector sums to 2.
       exclusive: m.type !== 'double_chance',
@@ -2255,6 +2257,7 @@ function extractLegs(event) {
         away: event.away.name,
         market: m.name,
         marketKey: m.key,
+        line: m.line, team: m.team, providerMarket: m.providerMarket, probabilitySource: m.probabilitySource,
         marketType: m.type,
         pick: o.label,
         pickKey: o.key,
@@ -2292,7 +2295,9 @@ function extractLegs(event) {
 function correlationFactor(legs) {
   const groups = new Map();
   for (const l of legs) {
-    const k = `${l.leagueCode}|${String(l.kickoff).slice(0, 13)}`;
+    const kickoff = new Date(l.kickoff);
+    const slot = Number.isFinite(kickoff.getTime()) ? kickoff.toISOString().slice(0, 13) : 'unknown';
+    const k = `${l.leagueCode}|${slot}`;
     groups.set(k, (groups.get(k) || 0) + 1);
   }
   let penalty = 1;
@@ -2405,7 +2410,7 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
 
     // ---- the same blend, with the ratings prior as the only local view --
     const w = SIGNAL_WEIGHTS;
-    const ratingsP = m.outcomes.map((o) => o.p);
+    const ratingsP = m.probabilitySource ? consensus : m.outcomes.map((o) => o.p);
     const model = new Array(n).fill(0);
     for (let i = 0; i < n; i++) model[i] = w.consensus * consensus[i] + w.sharp * sharp[i] + w.ratings * ratingsP[i];
     const mSum = model.reduce((a, c) => a + c, 0) || 1;
@@ -2450,7 +2455,9 @@ function priceEventFromOffers(event, offersByMarket, opts = {}) {
       key: m.key,
       name: m.name,
       type: m.type,
-      line: m.line ?? null,
+      probabilitySource: m.probabilitySource,
+      providerMarket: m.providerMarket,
+      line: m.line ?? m.point ?? null,
       team: m.team ?? null,
       exclusive: m.type !== 'double_chance',
       overround: round(mean(offers.map((off) => devig(off.odds).overround)) * 100, 2),
@@ -2600,8 +2607,12 @@ function evaluateTicketConfidence(legs, customStakeBands = null) {
 function buildLongshotTicket(legs, opts = {}) {
   const floor = Math.max(0, Number(opts.minEdgePerLeg ?? DEFAULT_BUILDER_OPTS.minEdgePerLeg));
   let result;
+  const tiers = [];
   for (const [threshold, label] of [[floor, 'strict'], [Math.min(floor, 0.004), 'relaxed'], [0, 'positive-edge only']]) {
     result = searchTicket(legs, { ...opts, minEdgePerLeg: threshold });
+    tiers.push({ label, threshold, eligible: result.report.eligible, events: result.report.distinctEligibleEvents, outcome: result.reason || 'ISSUED' });
+    result.report.edgeTiers = tiers;
+    result.report.outcome = result.reason || 'ISSUED';
     if (result.ok) {
       result.report.edgeTier = label;
       result.best.edgeTier = label;
@@ -2654,14 +2665,23 @@ function searchTicket(legs, opts = {}) {
   }
   report.eligible = pool.length;
 
-  if (!pool.length) {
-    return {
-      ok: false,
-      reason: 'NO_TICKET',
-      message: 'No eligible legs available in today’s market that cleared the confidence and odds constraints. Refusing is a feature.',
-      report,
-      alternatives: [],
-    };
+  const pricePool = legs.filter(l => Number.isFinite(l.odds) && l.odds >= 1.10 && l.odds <= o.maxLegOdds);
+  const probPool = pricePool.filter(l => Number.isFinite(l.modelProb) && l.modelProb >= o.minModelProb && l.modelProb <= 1);
+  const confPool = probPool.filter(l => Number.isFinite(l.confidence) && l.confidence >= o.minConfidence);
+  Object.assign(report, { passingPrice: pricePool.length, passingProbability: probPool.length,
+    passingConfidence: confPool.length, distinctEligibleEvents: new Set(pool.map(l => l.eventId)).size });
+  const byEvent = new Map();
+  for (const l of pool) {
+    const r = byEvent.get(l.eventId) || { min: Infinity, max: 0 };
+    r.min = Math.min(r.min, l.odds); r.max = Math.max(r.max, l.odds); byEvent.set(l.eventId, r);
+  }
+  const upper = [...byEvent.values()].map(r => r.max).sort((a,b) => b-a).slice(0,o.maxLegs).reduce((a,b) => a*b,1);
+  const lower = [...byEvent.values()].map(r => r.min).sort((a,b) => a-b).slice(0,o.minLegs).reduce((a,b) => a*b,1);
+  report.feasibility = { legCount: byEvent.size >= o.minLegs, oddsUpperBound: upper, oddsLowerBound: lower,
+    oddsTarget: upper >= minOdds && lower <= maxOdds && minOdds <= maxOdds };
+  if (!report.feasibility.legCount || !report.feasibility.oddsTarget) {
+    const reason = !report.feasibility.legCount ? (new Set(confPool.map(l => l.eventId)).size >= o.minLegs ? 'EDGE_POOL_TOO_SMALL' : 'INSUFFICIENT_ELIGIBLE_EVENTS') : 'ODDS_TARGET_UNREACHABLE';
+    return { ok: false, reason, message: `${reason}: ${byEvent.size} eligible distinct events; need ${o.minLegs}–${o.maxLegs} legs. Reachable odds bounds ${lower.toFixed(2)}–${upper.toFixed(2)}, target ${minOdds}–${maxOdds}.`, report, alternatives: [] };
   }
 
   // Keep alternative markets: the highest-edge market need not form the best slip.
@@ -2678,10 +2698,10 @@ function searchTicket(legs, opts = {}) {
   const seenSigs = new Set();
 
   let frontier = new Map();
-  frontier.set('0|-0', { legs: [], logOdds: 0, logP: 0, edgeSum: 0, events: [] });
+  frontier.set('0|-0', [{ legs: [], logOdds: 0, logP: 0, edgeSum: 0, events: [] }]);
 
   for (let depth = 1; depth <= o.maxLegs; depth++) {
-    const states = [...frontier.values()];
+    const states = [...frontier.values()].flat();
     if (!states.length) break;
     const buckets = new Map();
 
@@ -2718,9 +2738,13 @@ function searchTicket(legs, opts = {}) {
         if (nlo < logLo || depth < o.minLegs) {
           const b = Math.floor(nlo / bucketWidth);
           const key = `${b}|${depth}`;
-          const cur = buckets.get(key);
-          if (!cur || nlp + Math.log(correlationFactor(legsArr)) > cur.logP + Math.log(correlationFactor(cur.legs))) {
-            buckets.set(key, { legs: legsArr, logOdds: nlo, logP: nlp, edgeSum: nEdge, events });
+          const list = buckets.get(key) || [];
+          const signature = legsArr.map(l => l.legId).sort().join('|');
+          if (!list.some(x => x.signature === signature)) {
+            list.push({ legs: legsArr, logOdds: nlo, logP: nlp, edgeSum: nEdge, events, signature,
+              score: nlp + Math.log(correlationFactor(legsArr)) });
+            list.sort((a,b) => b.score - a.score);
+            buckets.set(key, list.slice(0, 8));
           }
         }
       }
@@ -2734,8 +2758,8 @@ function searchTicket(legs, opts = {}) {
   if (!found.length) {
     return {
       ok: false,
-      reason: 'NO_TICKET',
-      message: `No combination reached combined odds between ${minOdds.toFixed(1)} and ${maxOdds.toFixed(1)} with the available market pool. Refusing is a feature.`,
+      reason: 'SEARCH_EXHAUSTED',
+      message: `Bounded search exhausted: no combination reached combined odds between ${minOdds.toFixed(1)} and ${maxOdds.toFixed(1)} with the available market pool. Refusing is a feature.`,
       report,
       alternatives: [],
     };
@@ -2853,6 +2877,8 @@ function stripLeg(l) {
     home: l.home,
     away: l.away,
     market: l.market,
+    marketKey: l.marketKey, marketType: l.marketType, line: l.line, team: l.team,
+    providerMarket: l.providerMarket, probabilitySource: l.probabilitySource,
     pick: l.pick,
     odds: l.odds,
     book: l.book,
@@ -2893,7 +2919,7 @@ __exp_37 = evaluateTicketConfidence;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   lib/scan.js   →  hoists scanDay, scanForDay, scanDayLive, PROVIDERS, SPORT_MAP, fetchOddsApi
+   lib/scan.js   →  hoists scanDay, scanForDay, scanDayLive, failedLiveBoard, PROVIDERS, SPORT_MAP, fetchOddsApi
    ════════════════════════════════════════════════════════════════════════ */
 let __exp_38;
 let __exp_39;
@@ -2901,6 +2927,7 @@ let __exp_40;
 let __exp_41;
 let __exp_42;
 let __exp_43;
+let __exp_44;
 {
 const buildDayEvents = __exp_15;
 const tzDateKey = __exp_16;
@@ -2997,7 +3024,7 @@ const DAY_CACHE_LIMIT = 24;
 /**
  * Scan one day synchronously.
  * Note: When live odds are requested, sync scan cannot make network calls,
- * so it falls back to simulation and loudly stamps the diagnostics.
+ * so it returns an empty live failure rather than simulated selections.
  */
 function scanDay(dayKey, opts = {}) {
   const requested = opts.provider || 'sim';
@@ -3024,20 +3051,8 @@ function scanDay(dayKey, opts = {}) {
   }
 
   if (requested === 'oddsapi') {
-    if (!opts.apiKey) {
-      return stamp(
-        scanSim(dayKey, opts),
-        requested,
-        'sim',
-        'Live odds requested but no API key was supplied. Set ODDS_API_KEY or paste a key in Settings. These prices are simulated.'
-      );
-    }
-    return stamp(
-      scanSim(dayKey, opts),
-      requested,
-      'sim',
-      'Synchronous scan route cannot await live network fetch — use /api/scan/live. These prices are simulated.'
-    );
+    return failedLiveBoard(dayKey, { code: opts.apiKey ? 'ASYNC_REQUIRED' : 'NO_KEY',
+      message: 'Live scanning requires the asynchronous provider route and a valid API key.' }).scan;
   }
 
   return stamp(scanSim(dayKey, opts), requested, 'sim', null);
@@ -3122,17 +3137,17 @@ async function scanDayLive(dayKey, opts = {}) {
     throw e;
   }
 
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey) || !Number.isFinite(Date.parse(dayKey)))
+    throw Object.assign(new Error('Invalid selected date; use YYYY-MM-DD.'), { code: 'INVALID_DATE' });
+  if (dayKey < tzDateKey(new Date(), 'Africa/Lagos')) {
+    const failed = failedLiveBoard(dayKey, { code: 'PAST_DATE', message: 'Past dates require the historical odds API; the current live endpoint cannot reconstruct those quotes.' });
+    return { ...failed, events: [], legs: [], diagnostics: failed.scan.diagnostics, quota: {}, leagues: [] };
+  }
   const fetched = await fetchOddsApi(opts.sports, apiKey, {
-    daysAhead: opts.daysAhead ?? 3,
-    signal: opts.signal,
+    ...opts, dayKey,
   });
 
   const games = fetched.games;
-  if (!games.length) {
-    const e = new Error('The Odds API returned 0 games. Check your key, remaining quota, or date window.');
-    e.code = 'NO_GAMES';
-    throw e;
-  }
 
   const scan = stamp(scanLiveGames(dayKey, games, opts), 'oddsapi', 'oddsapi', null);
   scan.diagnostics.quota = fetched.quota;
@@ -3142,6 +3157,20 @@ async function scanDayLive(dayKey, opts = {}) {
 
   const builderOpts = { ...DEFAULT_BUILDER_OPTS, ...(opts.builder || {}) };
   const builderResult = buildLongshotTicket(scan.legs, builderOpts);
+  Object.assign(scan.diagnostics, { sportsRequested: fetched.leagues.length,
+    sportsSucceeded: fetched.leagues.filter(l => l.ok).length,
+    sportsFailed: fetched.leagues.filter(l => !l.ok).length,
+    rawFixtures: fetched.rawFixtures, fixturesOnDate: games.length,
+    fixturesWithQuotes: scan.events.length, extractedSelections: scan.legs.length,
+    additionalMarkets: fetched.additional, eventRequestsSkipped: fetched.eventRequestsSkipped,
+    availableMarketTypes: [...new Set(scan.legs.map(l => l.providerMarket || l.marketType))], builder: builderResult.report });
+  const coverageFailure = !fetched.leagues.some(l => l.ok) && fetched.leagues.find(l => l.code);
+  const failure = fetched.fatal || (coverageFailure ? { code: coverageFailure.code, message: `No sports fetched successfully: ${coverageFailure.code}. See per-sport coverage.` } : null) || (!games.length ? { code: fetched.leagues.find(l => l.code === 'PROVIDER_TIMEOUT')?.code || 'NO_EVENTS_FOR_DATE',
+    message: 'No events returned for the selected Lagos date. Past events require historical access; advance odds may not yet be published.' } :
+    !scan.legs.length ? { code: 'MARKETS_UNAVAILABLE', message: 'Fixtures found but no complete usable bookmaker markets were returned.' } : null);
+  if (failure) Object.assign(builderResult, { ok: false, best: null, reason: failure.code, message: failure.message });
+  scan.diagnostics.reasonCode = builderResult.reason || 'ISSUED';
+  builderResult.report.outcome = scan.diagnostics.reasonCode;
 
   return {
     scan,
@@ -3158,65 +3187,114 @@ async function scanDayLive(dayKey, opts = {}) {
 /**
  * Fetch The Odds API v4 across sports on the board with quota header capture and 15s timeout.
  */
-async function fetchOddsApi(sports, apiKey, { daysAhead = 3, signal = null } = {}) {
-  const games = [];
+const QUOTE_CACHE = new Map();
+const INFLIGHT = new Map();
+
+function failedLiveBoard(dayKey, err) {
+  const diagnostics = { dayKey, providerRequested: 'oddsapi', providerUsed: 'oddsapi',
+    fellBack: false, fetchedAt: new Date().toISOString(), ...(err.diagnostics || {}),
+    reasonCode: err.code || 'LIVE_FETCH_FAILED', message: err.message };
+  return { scan: { dayKey, events: [], legs: [], diagnostics }, builder: {
+    ok: false, reason: diagnostics.reasonCode, message: err.message, report: diagnostics, alternatives: [] } };
+}
+
+async function fetchOddsApi(sports, apiKey, opts = {}) {
+  const { dayKey, signal, timeoutMs = 15000, maxEventRequests = 40, concurrency = 3 } = opts;
+  const games = [], leagues = [], additional = [];
   const quota = { remaining: null, used: null };
-  const leagues = [];
-  const until = new Date(Date.now() + daysAhead * 86400000).toISOString().slice(0, 10);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort(new Error('Odds API fetch timed out after 15 seconds (504 Gateway Timeout).'));
-  }, 15000);
-
-  // Combine parent signal if provided
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
-  }
-
-  try {
-    for (const s of SPORT_MAP) {
-      if (sports && sports.length && !sports.includes(s.key)) continue;
-
-      const url =
-        `https://api.the-odds-api.com/v4/sports/${s.key}/odds/?apiKey=${encodeURIComponent(apiKey)}` +
-        `&regions=eu,uk,us&markets=h2h,totals,spreads&dateFormat=iso&oddsFormat=decimal&endDate=${until}`;
-
+  let fatal = null, rawFixtures = 0;
+  async function request(path, params = {}) {
+    const url = new URL(`https://api.the-odds-api.com/v4/sports/${path}`);
+    url.search = new URLSearchParams({ apiKey, ...params });
+    const key = url.href;
+    const cached = QUOTE_CACHE.get(key);
+    if (cached && cached.expires > Date.now()) {
+      if (cached.quota.remaining != null) quota.remaining = quota.remaining == null ? cached.quota.remaining : Math.min(quota.remaining, cached.quota.remaining);
+      quota.used = cached.quota.used;
+      return cached.data;
+    }
+    if (INFLIGHT.has(key)) return INFLIGHT.get(key);
+    const task = (async () => {
+      const ctrl = new AbortController();
+      const abort = () => ctrl.abort();
+      if (signal?.aborted) abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      const timer = setTimeout(abort, timeoutMs);
       try {
-        const res = await fetch(url, {
-          headers: { accept: 'application/json' },
-          signal: controller.signal,
-        });
-
-        if (quota.remaining === null) {
-          const remHeader = res.headers?.get?.('x-requests-remaining');
-          const usedHeader = res.headers?.get?.('x-requests-used');
-          quota.remaining = remHeader !== null && remHeader !== undefined ? Number(remHeader) : null;
-          quota.used = usedHeader !== null && usedHeader !== undefined ? Number(usedHeader) : null;
+        const res = await fetch(url.href, { signal: ctrl.signal });
+        for (const [field, header] of [['remaining', 'x-requests-remaining'], ['used', 'x-requests-used']]) {
+          const v = res.headers?.get(header);
+          if (v != null) quota[field] = Number(v);
         }
-
         if (!res.ok) {
-          leagues.push({ key: s.key, league: s.league, sport: s.sport, ok: false, status: res.status });
-          continue;
+          const errorBody = await res.json().catch(() => ({}));
+          const code = errorBody.error_code === 'OUT_OF_USAGE_CREDITS' ? 'QUOTA_EXHAUSTED' : res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 429 ? 'QUOTA_EXHAUSTED' : res.status === 403 ? 'MARKETS_UNAVAILABLE' : 'PROVIDER_ERROR';
+          throw Object.assign(new Error(`${code}: provider HTTP ${res.status}`), { code, status: res.status });
         }
-
-        const json = await res.json();
-        const fixturesCount = Array.isArray(json) ? json.length : 0;
-        leagues.push({ key: s.key, league: s.league, sport: s.sport, ok: true, fixtures: fixturesCount });
-
-        if (Array.isArray(json)) {
-          for (const g of json) games.push(normaliseOddsApiGame(g, s));
-        }
+        const data = await res.json();
+        if (QUOTE_CACHE.size > 300) QUOTE_CACHE.clear();
+        QUOTE_CACHE.set(key, { data, quota: { ...quota }, expires: Date.now() + 60000 });
+        return data;
       } catch (err) {
-        if (err.name === 'AbortError') throw err;
-        leagues.push({ key: s.key, league: s.league, sport: s.sport, ok: false, status: err?.message || 'network' });
+        if (ctrl.signal.aborted) throw Object.assign(new Error('Provider request timed out or was cancelled.'), { code: 'PROVIDER_TIMEOUT' });
+        throw err;
+      } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+    })();
+    INFLIGHT.set(key, task);
+    try { return await task; } finally { INFLIGHT.delete(key); }
+  }
+  let selected = SPORT_MAP.filter(s => !sports?.length || sports.includes(s.key));
+  // Tennis uses tournament-specific active keys, not generic ATP/WTA endpoints.
+  if (selected.some(s => s.sport === 'tennis')) {
+    try {
+      const active = await request('');
+      if (Array.isArray(active)) selected = selected.flatMap(s => s.sport !== 'tennis' ? [s] :
+        active.filter(x => x.active && x.key.startsWith(s.key + '_')).map(x => ({ ...s, key: x.key, league: x.title })));
+    } catch (err) { additional.push({ stage: 'sports-discovery', code: err.code, message: err.message }); }
+  }
+  const params = { regions: 'eu,uk,us', markets: 'h2h,totals,spreads', oddsFormat: 'decimal', dateFormat: 'iso' };
+  if (dayKey) {
+    const start = Date.parse(`${dayKey}T00:00:00+01:00`);
+    params.commenceTimeFrom = new Date(start).toISOString().replace('.000Z', 'Z');
+    params.commenceTimeTo = new Date(start + 86400000 - 1000).toISOString().replace('.000Z', 'Z');
+  }
+  for (const meta of selected) {
+    if (fatal || quota.remaining === 0) { leagues.push({ key: meta.key, ok: false, code: fatal?.code || 'QUOTA_EXHAUSTED' }); continue; }
+    try {
+      const data = await request(`${meta.key}/odds`, params);
+      if (!Array.isArray(data)) throw new Error('Malformed provider fixture response');
+      rawFixtures += data.length;
+      leagues.push({ key: meta.key, ok: true, fixtures: data.length });
+      for (const g of data) if (!dayKey || tzDateKey(new Date(g.commence_time), 'Africa/Lagos') === dayKey)
+        games.push({ ...structuredClone(g), _meta: meta });
+    } catch (err) {
+      leagues.push({ key: meta.key, ok: false, status: err.status, code: err.code || 'NETWORK_ERROR' });
+      if (['AUTHENTICATION_FAILURE', 'QUOTA_EXHAUSTED'].includes(err.code)) fatal = err;
+    }
+  }
+  const unique = [...new Map(games.map(g => [g.id, g])).values()];
+  let cursor = 0;
+  if (dayKey) await Promise.all(Array.from({ length: Math.max(1, Math.min(6, concurrency)) }, async () => {
+    while (cursor < Math.min(unique.length, maxEventRequests)) {
+      if (fatal || (quota.remaining !== null && quota.remaining < 15)) break;
+      const g = unique[cursor++];
+      try {
+        const markets = g._meta.sport === 'football' ? 'double_chance,alternate_totals,team_totals,alternate_team_totals,alternate_spreads' : 'alternate_totals,alternate_spreads';
+        const data = await request(`${g._meta.key}/events/${g.id}/odds`, { regions: 'eu,uk,us', markets, oddsFormat: 'decimal', dateFormat: 'iso' });
+        for (const book of data.bookmakers || []) {
+          const existing = g.bookmakers?.find(b => (b.key || b.title) === (book.key || book.title));
+          if (existing) existing.markets = [...existing.markets, ...book.markets];
+          else (g.bookmakers ||= []).push(book);
+        }
+        additional.push({ eventId: g.id, ok: true });
+      } catch (err) {
+        additional.push({ eventId: g.id, ok: false, code: err.code || 'NETWORK_ERROR' });
+        if (['AUTHENTICATION_FAILURE', 'QUOTA_EXHAUSTED'].includes(err.code)) fatal = err;
       }
     }
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  return { games, quota, leagues };
+  }));
+  return { games: unique.map(g => normaliseOddsApiGame(g, g._meta)), quota, leagues, additional,
+    rawFixtures, fatal, eventRequestsSkipped: Math.max(0, unique.length - cursor) };
 }
 
 function normaliseOddsApiGame(g, meta) {
@@ -3229,7 +3307,7 @@ function normaliseOddsApiGame(g, meta) {
     id: g.id,
     sport: meta.sport,
     league: {
-      code: meta.key.toUpperCase().slice(0, 10),
+      code: meta.key,
       name: meta.league,
       tier: meta.tier,
       noise: meta.noise,
@@ -3268,29 +3346,40 @@ function scanLiveGames(dayKey, games, opts = {}) {
 
     const groups = new Map();
     for (const b of g.books || []) {
-      for (const m of b.markets || []) {
+      for (const original of b.markets || []) {
+        const split = new Map();
+        for (const out of original.outcomes || []) {
+          const point = original.key.includes('spreads') ? (out.name === g.home.name ? out.point : -out.point) : out.point;
+          const k = `${point ?? ''}|${out.description || ''}`;
+          if (!split.has(k)) split.set(k, { ...original, point, team: out.description, outcomes: [] });
+          split.get(k).outcomes.push(out);
+        }
+        for (const m of split.values()) {
         let gkey = null;
         let type = null;
         let name = null;
         let point = null;
-        if (m.key === 'h2h') {
+        if (m.key === 'double_chance') {
+          gkey = type = 'double_chance'; name = 'Double chance';
+        } else if (m.key === 'h2h') {
           gkey = 'h2h';
           type = 'h2h';
           name = 'Match Result';
-        } else if (m.key === 'totals' && Number.isFinite(m.point)) {
-          gkey = `totals_${m.point}`;
+        } else if (['totals', 'alternate_totals', 'team_totals', 'alternate_team_totals'].includes(m.key) && Number.isFinite(m.point)) {
+          gkey = `${m.key}_${m.team || ''}_${m.point}`;
           type = 'totals';
-          name = `Total ${m.point} — Over/Under`;
+          name = `${m.team || 'Total'} ${m.point} — Over/Under`;
           point = m.point;
-        } else if (m.key === 'spreads' && Number.isFinite(m.point)) {
-          gkey = `spreads_${Math.abs(m.point)}`;
+        } else if (['spreads', 'alternate_spreads'].includes(m.key) && Number.isFinite(m.point)) {
+          gkey = `${m.key}_${m.point}`;
           type = 'spreads';
-          name = `Handicap ±${Math.abs(m.point)}`;
+          name = `Home handicap ${m.point}`;
           point = m.point;
         } else continue;
 
-        if (!groups.has(gkey)) groups.set(gkey, { key: gkey, type, name, point, entries: [] });
+        if (!groups.has(gkey)) groups.set(gkey, { key: gkey, type, name, point, providerMarket: m.key, team: m.team, entries: [] });
         groups.get(gkey).entries.push({ book: b, m });
+        }
       }
     }
 
@@ -3304,7 +3393,8 @@ function scanLiveGames(dayKey, games, opts = {}) {
           if (!names.includes(o.name)) names.push(o.name);
         }
       }
-      if (names.length < 2) continue;
+      if (names.length < 2 || (grp.type === 'double_chance' && names.length !== 3) ||
+        (g.sport === 'football' && grp.type === 'h2h' && (names.length !== 3 || !names.includes('Draw')))) continue;
 
       const offers = [];
       for (const { book, m } of grp.entries) {
@@ -3320,7 +3410,7 @@ function scanLiveGames(dayKey, games, opts = {}) {
 
       // Prior: h2h gets home boost, totals and spreads flat
       const prior = grp.type === 'h2h' ? outcomePrior(names, g.home?.name) : flatPrior(names);
-      marketsMeta.push({ key: gkey, name: grp.name, type: grp.type, point: grp.point, outcomes: prior });
+      marketsMeta.push({ key: gkey, name: grp.name, type: grp.type, point: grp.point, line: grp.point, team: grp.team, providerMarket: grp.providerMarket, probabilitySource: 'devigged-cross-book-consensus-and-sharp', outcomes: prior });
       offersByMarket.set(gkey, offers);
     }
 
@@ -3506,7 +3596,7 @@ function scanForDay(dayKey, runConfig = {}, overrides = {}) {
     ...(runConfig.builder || {}),
     ...(overrides.builder || {}),
   };
-  const result = buildLongshotTicket(scan.legs, builderOpts);
+  const result = scan.diagnostics.reasonCode ? failedLiveBoard(dayKey, { code: scan.diagnostics.reasonCode, message: scan.diagnostics.message }).builder : buildLongshotTicket(scan.legs, builderOpts);
   return {
     scan,
     builder: result,
@@ -3519,15 +3609,15 @@ function scanForDay(dayKey, runConfig = {}, overrides = {}) {
 __exp_38 = scanDay;
 __exp_39 = scanForDay;
 __exp_40 = scanDayLive;
-__exp_41 = PROVIDERS;
-__exp_42 = SPORT_MAP;
-__exp_43 = fetchOddsApi;
+__exp_41 = failedLiveBoard;
+__exp_42 = PROVIDERS;
+__exp_43 = SPORT_MAP;
+__exp_44 = fetchOddsApi;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/longshot.js   →  hoists createWeek, settleTicket, rescanDayTicket, computeWeekStats, assessGoal, getWeeklyVerdict, formatNaira, WEEK_STATUS, TICKET_STATUS
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_44;
 let __exp_45;
 let __exp_46;
 let __exp_47;
@@ -3536,12 +3626,14 @@ let __exp_49;
 let __exp_50;
 let __exp_51;
 let __exp_52;
+let __exp_53;
 {
 const getLagosWeek = __exp_18;
 const tzDateKey = __exp_16;
 const scanDay = __exp_38;
 const scanForDay = __exp_39;
 const scanDayLive = __exp_40;
+const failedLiveBoard = __exp_41;
 const buildLongshotTicket = __exp_31;
 const validateTicketOdds = __exp_33;
 const DEFAULT_BUILDER_OPTS = __exp_32;
@@ -3755,6 +3847,8 @@ function buildDayTicket(day, settings = {}, prepared = null) {
     minEdgePerLeg: Number(settings.minEdgePerLeg ?? 0.012),
   };
 
+  if (!prepared && settings.provider === 'oddsapi') prepared = failedLiveBoard(day.date,
+    { code: settings.oddsApi?.key ? 'LIVE_NOT_FETCHED' : 'NO_KEY', message: 'Live quotes were not fetched. Configure a valid API key and rescan; no simulated ticket was substituted.' });
   // Case 1: Prepared board from async live scan
   if (prepared?.builder && prepared?.scan) {
     const scan = prepared.scan;
@@ -3782,6 +3876,7 @@ function buildDayTicket(day, settings = {}, prepared = null) {
           reason,
         },
         scanDiagnostics: scan.diagnostics || null,
+        builderReport: builder.report, reasonCode: builder.reason || null,
         settledAt: null,
         payout: 0,
         profit: 0,
@@ -3806,6 +3901,7 @@ function buildDayTicket(day, settings = {}, prepared = null) {
         reason,
       },
       scanDiagnostics: scan.diagnostics || null,
+        builderReport: builder.report, reasonCode: builder.reason || null,
       settledAt: null,
       payout: 0,
       profit: 0,
@@ -3853,6 +3949,7 @@ function buildDayTicket(day, settings = {}, prepared = null) {
         reason,
       },
       scanDiagnostics: scan.diagnostics || null,
+        builderReport: builder.report, reasonCode: builder.reason || null,
       settledAt: null,
       payout: 0,
       profit: 0,
@@ -3877,6 +3974,7 @@ function buildDayTicket(day, settings = {}, prepared = null) {
       reason,
     },
     scanDiagnostics: scan.diagnostics || null,
+        builderReport: builder.report, reasonCode: builder.reason || null,
     settledAt: null,
     payout: 0,
     profit: 0,
@@ -3942,39 +4040,40 @@ function rescanDayTicket(week, dayIndex, settings = {}, prepared = null) {
   week.stats = computeWeekStats(week);
   return { week, ticket: newTicket };
 }
-__exp_44 = createWeek;
-__exp_45 = settleTicket;
-__exp_46 = rescanDayTicket;
-__exp_47 = computeWeekStats;
-__exp_48 = assessGoal;
-__exp_49 = getWeeklyVerdict;
-__exp_50 = formatNaira;
-__exp_51 = WEEK_STATUS;
-__exp_52 = TICKET_STATUS;
+__exp_45 = createWeek;
+__exp_46 = settleTicket;
+__exp_47 = rescanDayTicket;
+__exp_48 = computeWeekStats;
+__exp_49 = assessGoal;
+__exp_50 = getWeeklyVerdict;
+__exp_51 = formatNaira;
+__exp_52 = WEEK_STATUS;
+__exp_53 = TICKET_STATUS;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/http-core.js   →  hoists createApi, ENGINE_INFO, jsonSafe, toPlain
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_53;
 let __exp_54;
 let __exp_55;
 let __exp_56;
+let __exp_57;
 {
-const createWeek = __exp_44;
-const settleTicket = __exp_45;
-const rescanDayTicket = __exp_46;
-const computeWeekStats = __exp_47;
-const assessGoal = __exp_48;
-const getWeeklyVerdict = __exp_49;
-const formatNaira = __exp_50;
-const WEEK_STATUS = __exp_51;
-const TICKET_STATUS = __exp_52;
+const createWeek = __exp_45;
+const settleTicket = __exp_46;
+const rescanDayTicket = __exp_47;
+const computeWeekStats = __exp_48;
+const assessGoal = __exp_49;
+const getWeeklyVerdict = __exp_50;
+const formatNaira = __exp_51;
+const WEEK_STATUS = __exp_52;
+const TICKET_STATUS = __exp_53;
 const scanDay = __exp_38;
 const scanForDay = __exp_39;
 const scanDayLive = __exp_40;
-const PROVIDERS = __exp_41;
-const SPORT_MAP = __exp_42;
+const failedLiveBoard = __exp_41;
+const PROVIDERS = __exp_42;
+const SPORT_MAP = __exp_43;
 const SIGNAL_WEIGHTS = __exp_29;
 const tzNowParts = __exp_19;
 const tzDateKey = __exp_16;
@@ -4033,7 +4132,6 @@ function toPlain(value) {
 async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = null) {
   if (liveBoards && Object.keys(liveBoards).length) return liveBoards;
   if (settings.provider !== 'oddsapi') return {};
-  if (globalThis.window !== undefined) return {}; // in browser, dashboard fetches via same-origin
 
   const key = body?.apiKey || settings.oddsApi?.key || env?.ODDS_API_KEY || '';
   if (!key) return {};
@@ -4055,8 +4153,8 @@ async function livePreparedForWeek(env, body, settings, weekDays, liveBoards = n
         },
       });
       boards[day.date] = { scan: live.scan, builder: live.builder };
-    } catch {
-      // Fallback allowed per-day
+    } catch (err) {
+      boards[day.date] = failedLiveBoard(day.date, err);
     }
   }
 
@@ -4072,6 +4170,11 @@ function createApi({ store, env = {}, persistent = true } = {}) {
     const weeks = await store.listWeeks(20);
     const now = new Date();
     const tz = settings.tz || 'Africa/Lagos';
+    if (activeWeek) {
+      activeWeek.todayDate = tzDateKey(now, tz);
+      activeWeek.todayIndex = activeWeek.tickets.findIndex(t => t.date === activeWeek.todayDate);
+      activeWeek.tickets.forEach(t => { t.isToday = t.date === activeWeek.todayDate; });
+    }
 
     return {
       settings,
@@ -4131,6 +4234,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
       const wantProvider = q.get('provider') || settings.provider || 'sim';
       const apiKey = q.get('apiKey') || settings.oddsApi?.key || env.ODDS_API_KEY || '';
 
+      if (wantProvider === 'oddsapi') return api({ method, pathname: '/api/scan/live', query: q });
       const scanResult = scanForDay(
         date,
         {
@@ -4162,6 +4266,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
           diagnostics: scanResult.diagnostics,
           builder: scanResult.builder,
           events: scanResult.events,
+          legs: scanResult.legs,
           topLegs: [...scanResult.legs].sort((a, b) => b.edge - a.edge).slice(0, 50),
         },
       };
@@ -4210,6 +4315,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
             leagues: live.leagues,
             builder: live.builder,
             events: live.events,
+            legs: live.legs,
             topLegs: [...live.legs].sort((a, b) => b.edge - a.edge).slice(0, 50),
           },
         };
@@ -4248,6 +4354,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
         });
       }
 
+      if (body.provider && ['sim', 'oddsapi', 'manual'].includes(body.provider)) await store.saveSettings({ provider: body.provider });
       const mergedSettings = await store.getSettings();
       const lagosWeek = getLagosWeek(weekDate, tz);
 
@@ -4303,7 +4410,7 @@ function createApi({ store, env = {}, persistent = true } = {}) {
                 builder: { ...(settings.builder || {}), stakeBands: settings.stakeBands, minEdgePerLeg: settings.minEdgePerLeg },
               });
               prepared = { scan: live.scan, builder: live.builder };
-            } catch {}
+            } catch (err) { prepared = failedLiveBoard(ticket.date, err); }
           }
         }
 
@@ -4358,18 +4465,18 @@ function createApi({ store, env = {}, persistent = true } = {}) {
     return { status: 404, body: { error: `Route not found: ${method} ${pathname}` } };
   };
 }
-__exp_53 = createApi;
-__exp_54 = ENGINE_INFO;
-__exp_55 = jsonSafe;
-__exp_56 = toPlain;
+__exp_54 = createApi;
+__exp_55 = ENGINE_INFO;
+__exp_56 = jsonSafe;
+__exp_57 = toPlain;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/store-shared.js   →  hoists DEFAULT_SETTINGS, summariseWeek, reviveWeek
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_57;
 let __exp_58;
 let __exp_59;
+let __exp_60;
 {
 /**
  * store-shared.js — shared persistence definitions across server, memory, and browser stores.
@@ -4427,21 +4534,21 @@ function reviveWeek(week) {
   if (!week) return week;
   return week;
 }
-__exp_57 = DEFAULT_SETTINGS;
-__exp_58 = summariseWeek;
-__exp_59 = reviveWeek;
+__exp_58 = DEFAULT_SETTINGS;
+__exp_59 = summariseWeek;
+__exp_60 = reviveWeek;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    lib/memory-store.js   →  hoists createLocalStorageStore, createStoreAdapter, createMemoryStore
    ════════════════════════════════════════════════════════════════════════ */
-let __exp_60;
 let __exp_61;
 let __exp_62;
+let __exp_63;
 {
-const DEFAULT_SETTINGS = __exp_57;
-const summariseWeek = __exp_58;
-const reviveWeek = __exp_59;
+const DEFAULT_SETTINGS = __exp_58;
+const summariseWeek = __exp_59;
+const reviveWeek = __exp_60;
 
 /**
  * memory-store.js — storage adapter for in-memory (Vercel serverless) and localStorage (browser).
@@ -4612,12 +4719,12 @@ function createLocalStorageStore(key = 'longshot.store.v1', opts = {}) {
   store.evictions = evictions;
   return store;
 }
-__exp_60 = createLocalStorageStore;
-__exp_61 = createStoreAdapter;
-__exp_62 = createMemoryStore;
+__exp_61 = createLocalStorageStore;
+__exp_62 = createStoreAdapter;
+__exp_63 = createMemoryStore;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    facade — 49 public bindings
    ════════════════════════════════════════════════════════════════════════ */
-export { __exp_7 as round, __exp_6 as clamp, __exp_10 as mean, __exp_11 as stdev, __exp_12 as ev, __exp_9 as devig, __exp_18 as getLagosWeek, __exp_20 as upcomingWeeks, __exp_16 as tzDateKey, __exp_19 as tzNowParts, __exp_17 as formatKickoff, __exp_28 as classifyBook, __exp_27 as extractLegs, __exp_23 as correlationFactor, __exp_30 as confidence, __exp_24 as confBand, __exp_29 as SIGNAL_WEIGHTS, __exp_31 as buildLongshotTicket, __exp_33 as validateTicketOdds, __exp_37 as evaluateTicketConfidence, __exp_32 as DEFAULT_BUILDER_OPTS, __exp_34 as DEFAULT_STAKE_BANDS, __exp_35 as MIN_TICKET_ODDS, __exp_36 as MAX_TICKET_ODDS, __exp_38 as scanDay, __exp_39 as scanForDay, __exp_40 as scanDayLive, __exp_43 as fetchOddsApi, __exp_41 as PROVIDERS, __exp_42 as SPORT_MAP, __exp_44 as createWeek, __exp_45 as settleTicket, __exp_46 as rescanDayTicket, __exp_47 as computeWeekStats, __exp_48 as assessGoal, __exp_49 as getWeeklyVerdict, __exp_50 as formatNaira, __exp_51 as WEEK_STATUS, __exp_52 as TICKET_STATUS, __exp_53 as createApi, __exp_54 as ENGINE_INFO, __exp_55 as jsonSafe, __exp_56 as toPlain, __exp_57 as DEFAULT_SETTINGS, __exp_58 as summariseWeek, __exp_59 as reviveWeek, __exp_60 as createLocalStorageStore, __exp_61 as createStoreAdapter, __exp_62 as createMemoryStore };
+export { __exp_7 as round, __exp_6 as clamp, __exp_10 as mean, __exp_11 as stdev, __exp_12 as ev, __exp_9 as devig, __exp_18 as getLagosWeek, __exp_20 as upcomingWeeks, __exp_16 as tzDateKey, __exp_19 as tzNowParts, __exp_17 as formatKickoff, __exp_28 as classifyBook, __exp_27 as extractLegs, __exp_23 as correlationFactor, __exp_30 as confidence, __exp_24 as confBand, __exp_29 as SIGNAL_WEIGHTS, __exp_31 as buildLongshotTicket, __exp_33 as validateTicketOdds, __exp_37 as evaluateTicketConfidence, __exp_32 as DEFAULT_BUILDER_OPTS, __exp_34 as DEFAULT_STAKE_BANDS, __exp_35 as MIN_TICKET_ODDS, __exp_36 as MAX_TICKET_ODDS, __exp_38 as scanDay, __exp_39 as scanForDay, __exp_40 as scanDayLive, __exp_44 as fetchOddsApi, __exp_42 as PROVIDERS, __exp_43 as SPORT_MAP, __exp_45 as createWeek, __exp_46 as settleTicket, __exp_47 as rescanDayTicket, __exp_48 as computeWeekStats, __exp_49 as assessGoal, __exp_50 as getWeeklyVerdict, __exp_51 as formatNaira, __exp_52 as WEEK_STATUS, __exp_53 as TICKET_STATUS, __exp_54 as createApi, __exp_55 as ENGINE_INFO, __exp_56 as jsonSafe, __exp_57 as toPlain, __exp_58 as DEFAULT_SETTINGS, __exp_59 as summariseWeek, __exp_60 as reviveWeek, __exp_61 as createLocalStorageStore, __exp_62 as createStoreAdapter, __exp_63 as createMemoryStore };
